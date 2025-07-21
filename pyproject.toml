@@ -1,0 +1,24 @@
+[project]
+name = "mcp_project"
+version = "0.1.0"
+description = "Modular MCP server with Jira and Salesforce integrations"
+authors = [{ name = "Jaroslav", email = "you@example.com" }]
+requires-python = ">=3.10"
+
+dependencies = [
+    "fastapi",
+    "fastmcp",
+    "python-dotenv",
+    "jira",
+    "simple-salesforce"
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
