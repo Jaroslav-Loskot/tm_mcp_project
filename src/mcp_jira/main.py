@@ -3,7 +3,7 @@ import os
 import re
 import textwrap
 from typing import Dict, List, Optional
-from fastapi import HTTPException
+from fastapi import HTTPException, APIRouter 
 from fastmcp import FastMCP
 from jira import JIRA
 from dotenv import load_dotenv
@@ -23,6 +23,17 @@ JIRA_TOKEN = os.getenv("JIRA_API_TOKEN")
 jira = JIRA(server=JIRA_URL, basic_auth=(JIRA_USER, JIRA_TOKEN))
 
 mcp = FastMCP("Jira MCP Server", auth=None, stateless_http=True)
+
+
+health_router = APIRouter()
+
+@health_router.get("/health")
+def health_check():
+    return {"status": "ok"}
+
+mcp.app.include_router(health_router)
+
+
 
 @mcp.tool()
 def search_issues(jql: str, max_results: int = 5) -> list[dict]:
