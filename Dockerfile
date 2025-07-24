@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y curl \
 ENV PYTHONPATH="/src"
 
 # Expose FastAPI app port
-EXPOSE 8001
+EXPOSE 8100
 
 # ✅ FIX: Run using Python module style to support relative imports and match local dev
 CMD ["python", "-m", "mcp_jira.main"]
