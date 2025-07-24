@@ -18,21 +18,11 @@ JIRA_URL = os.getenv("JIRA_BASE_URL")
 JIRA_USER = os.getenv("JIRA_EMAIL")
 JIRA_TOKEN = os.getenv("JIRA_API_TOKEN")
 
-
-
 jira = JIRA(server=JIRA_URL, basic_auth=(JIRA_USER, JIRA_TOKEN))
 
-mcp = FastMCP("Jira MCP Server", auth=None, stateless_http=True)
 
 
-health_router = APIRouter()
-
-@health_router.get("/health")
-def health_check():
-    return {"status": "ok"}
-
-mcp.app.include_router(health_router)
-
+mcp = FastMCP("Jira MCP Server", auth=None)
 
 
 @mcp.tool()
@@ -387,8 +377,5 @@ def summarize_jira_tickets(ticket_keys: List[str]) -> Dict:
         raise HTTPException(status_code=500, detail=f"Failed to summarize Jira tickets: {e}")
 
 
-
-
-
 if __name__ == "__main__":
-    mcp.run(transport="sse", host="127.0.0.1", port=8001)  # run 'fastmcp run main.py --transport sse --port 8001'
+    mcp.run(transport="sse", host="0.0.0.0", port=8001)  # run 'fastmcp run main.py --transport sse --port 8001'

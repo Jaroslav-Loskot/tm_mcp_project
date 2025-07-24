@@ -1,5 +1,6 @@
 services:
   mcp-jira:
+    container_name: mcp-jira
     build:
       context: .
       dockerfile: Dockerfile
@@ -8,8 +9,9 @@ services:
     env_file:
       - .env
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
+    networks:
+      - n8n_default
+
+networks:
+  n8n_default:
+    external: true
