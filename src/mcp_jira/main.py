@@ -375,6 +375,30 @@ def summarize_jira_tickets(ticket_keys: List[str]) -> Dict:
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to summarize Jira tickets: {e}")
+    
+
+@mcp.tool()
+def list_appsupport_projects() -> List[Dict[str, str]]:
+    """
+    List all Jira projects under the 'Application Support' category.
+    
+    Returns:
+    - A list of projects with their key and name.
+    """
+    try:
+        appsupport_projects = []
+        projects = jira.projects()
+        for project in projects:
+            category = getattr(project.projectCategory, "name", None)
+            if category and category.lower() == "AppSupport":
+                appsupport_projects.append({
+                    "key": project.key,
+                    "name": project.name
+                })
+        return appsupport_projects
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list Application Support projects: {e}")
+
 
 
 if __name__ == "__main__":
