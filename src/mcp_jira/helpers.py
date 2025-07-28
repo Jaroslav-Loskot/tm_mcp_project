@@ -23,6 +23,9 @@ JIRA_URL = os.getenv("JIRA_BASE_URL")
 JIRA_USER = os.getenv("JIRA_EMAIL")
 JIRA_TOKEN = os.getenv("JIRA_API_TOKEN")
 
+DEFAULT_CATEGORY = os.getenv("DEFAULT_PROJECT_CATEGORY", "")
+EXCLUDED_KEYS = [k.strip() for k in os.getenv("EXCLUDED_PROJECT_KEYS", "").split(",") if k.strip()]
+
 jira = JIRA(server=JIRA_URL, basic_auth=(JIRA_USER, JIRA_TOKEN))
 
 
@@ -191,21 +194,39 @@ def get_all_jira_priorities() -> list[str]:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch Jira priorities: {e}")
     
-
-def get_all_jira_projects() -> List[Dict[str, str]]:
+def _list_projects() -> list[dict]:
     """
-    Fetches all available Jira projects.
+    List Jira projects visible to the current user.
 
-    Returns:
-        A list of dictionaries with project keys and names (e.g. [{'key': 'UCB', 'name': 'UCB Italy'}, ...])
     """
     try:
         projects = jira.projects()
-        return [{"key": p.key, "name": p.name} for p in projects]
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch Jira projects: {e}")
+        filtered_projects = []
 
-    
+        for p in projects:
+            # Exclude if key is in EXCLUDED_KEYS
+            if p.key in EXCLUDED_KEYS:
+                continue
+
+            # Filter by category if specified
+            category = getattr(p, 'projectCategory', None)
+            if DEFAULT_CATEGORY:
+                if category and getattr(category, 'name', '') == DEFAULT_CATEGORY:
+                    filtered_projects.append({
+                        "key": p.key,
+                        "name": p.name,
+                        "category": category.name
+                    })
+            else:
+                filtered_projects.append({
+                    "key": p.key,
+                    "name": p.name,
+                    "category": getattr(category, 'name', '') if category else None
+                })
+
+        return filtered_projects
+    except Exception as e:
+        return [{"error": str(e)}]
 
 
 def _generate_jql_from_input(
@@ -224,7 +245,7 @@ def _generate_jql_from_input(
     Returns:
         dict with 'jql' and 'max_results' keys.
     """
-    all_projects = get_all_jira_projects()  # [{'key': 'UCB', 'name': 'Unicredit Italy', 'category': 'AppSupport'}, ...]
+    all_projects = _list_projects()  # [{'key': 'UCB', 'name': 'Unicredit Italy', 'category': 'AppSupport'}, ...]
 
     # Optional: Filter by category
     if category_filter:

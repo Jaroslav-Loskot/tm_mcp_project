@@ -14,7 +14,7 @@ from jira import JIRA
 from dotenv import load_dotenv
 
 from mcp_common.utils.bedrock_wrapper import call_claude
-from mcp_jira.helpers import _generate_jql_from_input, _parse_jira_date, _resolve_project_name, extract_issue_fields
+from mcp_jira.helpers import _generate_jql_from_input, _list_projects, _parse_jira_date, _resolve_project_name, extract_issue_fields
 
 
 load_dotenv(override=True)
@@ -77,35 +77,7 @@ def list_projects() -> list[dict]:
     List Jira projects visible to the current user.
 
     """
-    try:
-        projects = jira.projects()
-        filtered_projects = []
-
-        for p in projects:
-            # Exclude if key is in EXCLUDED_KEYS
-            if p.key in EXCLUDED_KEYS:
-                continue
-
-            # Filter by category if specified
-            category = getattr(p, 'projectCategory', None)
-            if DEFAULT_CATEGORY:
-                if category and getattr(category, 'name', '') == DEFAULT_CATEGORY:
-                    filtered_projects.append({
-                        "key": p.key,
-                        "name": p.name,
-                        "category": category.name
-                    })
-            else:
-                filtered_projects.append({
-                    "key": p.key,
-                    "name": p.name,
-                    "category": getattr(category, 'name', '') if category else None
-                })
-
-        return filtered_projects
-    except Exception as e:
-        return [{"error": str(e)}]
-
+    return _list_projects()
 
 
 @mcp.tool
