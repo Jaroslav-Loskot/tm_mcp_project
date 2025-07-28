@@ -1,1 +1,1 @@
-GET http://localhost:9000/sse
+GET http://localhost:8100/sse/

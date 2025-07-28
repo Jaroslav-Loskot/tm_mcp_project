@@ -1,13 +1,12 @@
 import sys
 import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
 
-from mcp_jira.main import list_projects
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from mcp_jira.helpers import _generate_jql_from_input, _resolve_project_name
+from mcp_jira.main import execute_jql_query
 
 
 # print(list_appsupport_projects())
 
-print(list_projects())
+print(execute_jql_query("category in (AppSupport) AND project in (ASUCIT)"))
 
