@@ -1,22 +1,21 @@
 FROM python:3.12-slim
 
+# Set working dir to the repo root
 WORKDIR /app
 
-# Copy all sources under /src
-COPY src /src
+# Copy entire project structure (src/ will be under /app/src)
+COPY ../.. /app
 
-RUN apt-get update && apt-get install -y curl \
- && pip install --upgrade pip \
- && pip install -r /src/requirements.txt \
- && apt-get clean \
- && rm -rf /var/lib/apt/lists/*
+# Set PYTHONPATH so both mcp_jira and mcp_common are importable
+ENV PYTHONPATH=/app/src
 
+# Install dependencies
+RUN pip install --upgrade pip \
+ && pip install "mcp-common @ file:///app/src/mcp_common" \
+ && pip install .
 
-# Tell Python where to find your packages
-ENV PYTHONPATH="/src"
+# Move to src so we can run modules properly
+WORKDIR /app/src
 
-# Expose FastAPI port
-EXPOSE 8100
-
-# Run the main script directly
-CMD ["python", "/src/mcp_jira/main.py"]
+# Run the Jira module
+CMD ["python", "-m", "mcp_jira.main"]
