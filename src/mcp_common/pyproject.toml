@@ -1,10 +1,10 @@
 [project]
-name = "mcp_common"  # ✅ MUST match the name used in mcp_jira
+name = "mcp_common"
 version = "0.1.0"
 description = "Shared MCP utilities"
 authors = [{ name = "Jaroslav" }]
 dependencies = [
-    "fastapi",         # optional, list actual deps if needed
+    "fastapi",
     "boto3",
     "python-dotenv"
 ]

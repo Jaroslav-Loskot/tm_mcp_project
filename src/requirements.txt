@@ -1,0 +1,5 @@
+fastapi
+fastmcp==2.10.6
+python-dotenv
+jira
+boto3

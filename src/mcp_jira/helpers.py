@@ -2,7 +2,7 @@ from dataclasses import dataclass
 import json
 import logging
 import time
-from typing import List, Optional
+from typing import Dict, List, Optional
 from difflib import get_close_matches
 from fastapi import HTTPException
 from datetime import datetime, timedelta
@@ -12,7 +12,7 @@ import os
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 import re
-from mcp_common.utils.bedrock_wrapper import call_claude
+from mcp_common.utils.bedrock_wrapper import call_claude, call_nova_lite
 # from mcp_jira.helpers import get_clean_comments_from_issue
 
 
@@ -192,26 +192,59 @@ def get_all_jira_priorities() -> list[str]:
         raise HTTPException(status_code=500, detail=f"Failed to fetch Jira priorities: {e}")
     
 
-def get_all_jira_projects() -> List[str]:
+def get_all_jira_projects() -> List[Dict[str, str]]:
     """
     Fetches all available Jira projects.
-    
+
     Returns:
-        A list of project names (e.g. ['UCB Italy', 'SLSP', 'CAF'])
+        A list of dictionaries with project keys and names (e.g. [{'key': 'UCB', 'name': 'UCB Italy'}, ...])
     """
     try:
         projects = jira.projects()
-        return [p.name for p in projects]  # or use p.key if you want keys
+        return [{"key": p.key, "name": p.name} for p in projects]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch Jira projects: {e}")
+
     
 
 
+def _generate_jql_from_input(
+    user_input: str,
+    category_filter: Optional[str] = os.getenv("DEFAULT_PROJECT_CATEGORY"),
+    exclude_projects: Optional[List[str]] = os.getenv("EXCLUDED_PROJECT_KEYS", "")
+) -> dict:
+    """
+    Converts natural language input into JQL using Claude.
 
+    Args:
+        user_input: Free-form user query like "all high priority tickets for Erste".
+        category_filter: Optional Jira project category to include only certain projects.
+        exclude_projects: Optional list of project keys to exclude.
 
-def _generate_jql_from_input(user_input: str,) -> dict:
-    allowed_projects=get_all_jira_projects()
-    allowed_priorities=get_all_jira_priorities()
+    Returns:
+        dict with 'jql' and 'max_results' keys.
+    """
+    all_projects = get_all_jira_projects()  # [{'key': 'UCB', 'name': 'Unicredit Italy', 'category': 'AppSupport'}, ...]
+
+    # Optional: Filter by category
+    if category_filter:
+        all_projects = [
+            p for p in all_projects
+            if p.get("category", "").lower() == category_filter.lower()
+        ]
+
+    # Optional: Exclude project keys
+    if exclude_projects:
+        all_projects = [
+            p for p in all_projects
+            if p["key"] not in exclude_projects
+        ]
+
+    if not all_projects:
+        raise ValueError("No allowed projects after applying filters.")
+
+    allowed_project_keys = [p["key"] for p in all_projects]
+    allowed_priorities = get_all_jira_priorities()  # e.g., ["High", "Medium", "Low"]
 
     system_prompt = (
         "You are a Jira assistant that converts natural language requests into structured JSON "
@@ -234,26 +267,25 @@ def _generate_jql_from_input(user_input: str,) -> dict:
     )
 
     user_message = f"""
-User Input:
-{user_input}
+    User Input:
+    {user_input}
 
-Allowed project keys:
-{', '.join(allowed_projects)}
+    Allowed project keys:
+    {', '.join(allowed_project_keys)}
 
-Allowed priorities:
-{', '.join(allowed_priorities)}
+    Allowed priorities:
+    {', '.join(allowed_priorities)}
 
-Expected output format:
+    Expected output format:
 
-{{
-  "jql": "<VALID_JQL_STRING>",
-  "max_results": <integer or null>
-}}
-"""
+    {{
+      "jql": "<VALID_JQL_STRING>",
+      "max_results": <integer or null>
+    }}
+    """
 
     response = call_claude(system_prompt, user_message).strip()
 
-    # Extract JSON
     try:
         fenced = re.search(r"\{.*\}", response, re.DOTALL)
         response_json = fenced.group(0) if fenced else response
@@ -265,3 +297,86 @@ Expected output format:
         raise ValueError(f"Claude did not return a valid structure: {result}")
 
     return result
+
+
+
+
+def _resolve_project_name(human_input: str, category_filter: Optional[str] = None) -> List[Dict[str, str]]:
+    """
+    Resolves the most relevant Jira projects from human input.
+
+    Args:
+        human_input: Free-form user input like "akbank" or "tipsport"
+        category_filter: Optional category name (e.g., "Application Support")
+
+    Returns:
+        A list of up to 5 dicts like [{'key': 'UCB', 'name': 'Unicredit Italy'}, ...]
+    """
+    try:
+        projects = jira.projects()
+        all_projects = []
+
+        for p in projects:
+            category = getattr(p, 'projectCategory', None)
+            all_projects.append({
+                "key": p.key,
+                "name": p.name,
+                "category": getattr(category, 'name', '') if category else ''
+            })
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch Jira projects: {e}")
+
+    # Apply optional category filtering
+    if category_filter:
+        filtered_projects = [
+            p for p in all_projects
+            if p["category"].lower() == category_filter.lower()
+        ]
+    else:
+        filtered_projects = all_projects
+
+    if not filtered_projects:
+        raise ValueError(f"No projects found in category '{category_filter}'.")
+
+    system_prompt = (
+        "You are a Jira assistant helping users match human-friendly descriptions to existing Jira project names.\n\n"
+        "RULES:\n"
+        "- Select the TOP 5 most relevant project names from the provided list.\n"
+        "- Output only a JSON array of the selected project names, ordered by relevance.\n"
+        "- Do NOT return any explanations or markdown.\n"
+    )
+
+    formatted_projects = "\n".join(f"- {p['name']}" for p in filtered_projects)
+
+    user_message = f"""
+    User input:
+    {human_input}
+
+    Available Jira projects:
+    {formatted_projects}
+
+    Expected output format:
+    ["Unicredit Italy", "Core Banking", "Security Improvements"]
+    """
+
+    response = call_nova_lite(system_prompt + "\n\n" + user_message).strip()
+
+    try:
+        match = re.search(r"\[.*?\]", response, re.DOTALL)
+        json_str = match.group(0) if match else response
+        selected_names = json.loads(json_str)
+    except Exception as e:
+        raise ValueError(f"❌ Failed to parse Nova's response: {e}\n\nRaw response:\n{response}")
+
+    if not isinstance(selected_names, list) or not all(isinstance(n, str) for n in selected_names):
+        raise ValueError(f"❌ Unexpected format returned from Nova: {selected_names}")
+
+    # Match names back to project dicts
+    name_to_project = {p['name']: p for p in filtered_projects}
+    selected_projects = [name_to_project[name] for name in selected_names if name in name_to_project]
+
+    return selected_projects[:5]
+
+
+
+
