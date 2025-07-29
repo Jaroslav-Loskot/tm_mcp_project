@@ -28,5 +28,5 @@ jira = JIRA(server=JIRA_URL, basic_auth=(JIRA_USER, JIRA_TOKEN))
 
 # print(list_appsupport_projects())
 # print(_generate_jql_from_input("project = ASEAT"))
-print(_execute_jql_query("project = ASEAT"))
+print(len(_execute_jql_query("project = ASEAT")))
 

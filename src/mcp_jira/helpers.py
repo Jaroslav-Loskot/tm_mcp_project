@@ -363,7 +363,7 @@ def _summarize_jql_query(jql: str) -> Dict:
 
 def _execute_jql_query(jql: str) -> List[Dict]:
     """
-    Executes a JQL query and returns all matching issues using Jira Cloud's enhanced search via automatic pagination.
+    Executes a JQL query and returns all matching issues using Jira Cloud's enhanced search with pagination.
 
     Returns the following fields:
     - key
@@ -378,34 +378,47 @@ def _execute_jql_query(jql: str) -> List[Dict]:
     - priority
     """
     try:
-        issues = jira.enhanced_search_issues(
-            jql_str=jql,
-            maxResults=False,  # Automatically paginate and fetch all
-            fields=[
-                "summary", "issuetype", "status", "assignee",
-                "created", "updated", "project", "resolution", "priority"
-            ],
-            use_post=True  # Ensures Jira Cloud compatibility
-        )
+        all_issues = []
+        next_page_token = None
 
-        return [
-            {
-                "key": issue.key,
-                "summary": getattr(issue.fields, "summary", None),
-                "issue_type": getattr(getattr(issue.fields, "issuetype", None), "name", None),
-                "status": getattr(getattr(issue.fields, "status", None), "name", None),
-                "assignee": getattr(getattr(issue.fields, "assignee", None), "displayName", None),
-                "created": getattr(issue.fields, "created", None),
-                "updated": getattr(issue.fields, "updated", None),
-                "project": getattr(getattr(issue.fields, "project", None), "key", None),
-                "resolution": getattr(getattr(issue.fields, "resolution", None), "name", None),
-                "priority": getattr(getattr(issue.fields, "priority", None), "name", None),
-            }
-            for issue in issues
-        ]
+        while True:
+            response = jira.enhanced_search_issues(
+                jql_str=jql,
+                nextPageToken=next_page_token,
+                maxResults=100,
+                fields=[
+                    "summary", "issuetype", "status", "assignee",
+                    "created", "updated", "project", "resolution", "priority"
+                ],
+                use_post=True,
+                json_result=False
+            )
+
+            for issue in response:
+                fields = issue.fields
+                all_issues.append({
+                    "key": issue.key,
+                    "summary": getattr(fields, "summary", None),
+                    "issue_type": getattr(getattr(fields, "issuetype", None), "name", None),
+                    "status": getattr(getattr(fields, "status", None), "name", None),
+                    "assignee": getattr(getattr(fields, "assignee", None), "displayName", None),
+                    "created": getattr(fields, "created", None),
+                    "updated": getattr(fields, "updated", None),
+                    "project": getattr(getattr(fields, "project", None), "key", None),
+                    "resolution": getattr(getattr(fields, "resolution", None), "name", None),
+                    "priority": getattr(getattr(fields, "priority", None), "name", None),
+                })
+
+            # Pagination check
+            next_page_token = getattr(response, "nextPageToken", None)
+            if not next_page_token:
+                break
+
+        return all_issues
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to execute JQL: {e}")
+
 
 
 
