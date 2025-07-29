@@ -321,35 +321,32 @@ def _generate_jql_from_input(
 
 def _summarize_jql_query(jql: str) -> Dict:
     """
-    Executes a JQL query and returns a summary including:
+    Executes a JQL query using enhanced search and returns a summary including:
     - total issue count
     - number of issues per status
     """
     try:
-        max_limit = 100  # Jira Cloud default max page size
-        start_at = 0
         all_statuses = []
+        next_page_token = None
+        max_results = 100
 
         while True:
             issues = jira.enhanced_search_issues(
                 jql_str=jql,
-                startAt=start_at,
-                maxResults=max_limit,
+                nextPageToken=next_page_token,
+                maxResults=max_results,
                 fields=["status"],
-                use_post=False  # classic GET-based pagination
+                use_post=True  # POST required for Jira Cloud
             )
-
-            if not issues:
-                break
 
             for issue in issues:
                 status = getattr(getattr(issue.fields, "status", None), "name", "Unknown")
                 all_statuses.append(status)
 
-            if len(issues) < max_limit:
-                break  # last page
-
-            start_at += max_limit
+            # Pagination
+            next_page_token = getattr(issues, "nextPageToken", None)
+            if not next_page_token:
+                break
 
         status_counts = Counter(all_statuses)
         return {
