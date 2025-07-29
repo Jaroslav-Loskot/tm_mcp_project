@@ -331,7 +331,7 @@ def _summarize_jql_query(jql: str) -> Dict:
         all_statuses = []
 
         while True:
-            issues = jira.search_issues(
+            issues = jira.enhanced_search_issues(
                 jql_str=jql,
                 startAt=start_at,
                 maxResults=max_limit,
@@ -359,6 +359,53 @@ def _summarize_jql_query(jql: str) -> Dict:
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to summarize JQL: {e}")
+
+
+def _execute_jql_query(jql: str) -> List[Dict]:
+    """
+    Executes a JQL query and returns all matching issues using Jira Cloud's enhanced search via automatic pagination.
+
+    Returns the following fields:
+    - key
+    - summary
+    - issue_type
+    - status
+    - assignee
+    - created
+    - updated
+    - project
+    - resolution
+    - priority
+    """
+    try:
+        issues = jira.enhanced_search_issues(
+            jql_str=jql,
+            maxResults=False,  # Automatically paginate and fetch all
+            fields=[
+                "summary", "issuetype", "status", "assignee",
+                "created", "updated", "project", "resolution", "priority"
+            ],
+            use_post=True  # Ensures Jira Cloud compatibility
+        )
+
+        return [
+            {
+                "key": issue.key,
+                "summary": getattr(issue.fields, "summary", None),
+                "issue_type": getattr(getattr(issue.fields, "issuetype", None), "name", None),
+                "status": getattr(getattr(issue.fields, "status", None), "name", None),
+                "assignee": getattr(getattr(issue.fields, "assignee", None), "displayName", None),
+                "created": getattr(issue.fields, "created", None),
+                "updated": getattr(issue.fields, "updated", None),
+                "project": getattr(getattr(issue.fields, "project", None), "key", None),
+                "resolution": getattr(getattr(issue.fields, "resolution", None), "name", None),
+                "priority": getattr(getattr(issue.fields, "priority", None), "name", None),
+            }
+            for issue in issues
+        ]
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to execute JQL: {e}")
 
 
 

@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 
 
 from mcp_common.utils.bedrock_wrapper import call_claude
-from mcp_jira.helpers import _generate_jql_from_input, _list_projects, _parse_jira_date, _resolve_project_name, _summarize_jql_query, extract_issue_fields
+from mcp_jira.helpers import _execute_jql_query, _generate_jql_from_input, _list_projects, _parse_jira_date, _resolve_project_name, _summarize_jql_query, extract_issue_fields
 
 
 load_dotenv(override=True)
@@ -193,11 +193,10 @@ def generate_jql_from_input(user_input: str) -> dict:
         "jql": raw["jql"]
     }
 
-
 @mcp.tool
 def execute_jql_query(jql: str) -> List[Dict]:
     """
-    Executes a JQL query and returns all matching issues using Jira Cloud's pagination.
+    Executes a JQL query and returns all matching issues using Jira Cloud's enhanced search via automatic pagination.
 
     Returns the following fields:
     - key
@@ -212,50 +211,11 @@ def execute_jql_query(jql: str) -> List[Dict]:
     - priority
     """
     try:
-        results = []
-        start_at = 0
-        page_size = 100
-
-        while True:
-            issues = jira.search_issues(
-                jql_str=jql,
-                startAt=start_at,
-                maxResults=page_size,
-                fields=[
-                    "summary", "issuetype", "status", "assignee",
-                    "created", "updated", "project", "resolution", "priority"
-                ],
-                expand=None,
-                use_post=False  # Enable pagination support
-            )
-
-            if not issues:
-                break
-
-            for issue in issues:
-                fields = issue.fields
-                results.append({
-                    "key": issue.key,
-                    "summary": getattr(fields, "summary", None),
-                    "issue_type": getattr(getattr(fields, "issuetype", None), "name", None),
-                    "status": getattr(getattr(fields, "status", None), "name", None),
-                    "assignee": getattr(getattr(fields, "assignee", None), "displayName", None),
-                    "created": getattr(fields, "created", None),
-                    "updated": getattr(fields, "updated", None),
-                    "project": getattr(getattr(fields, "project", None), "key", None),
-                    "resolution": getattr(getattr(fields, "resolution", None), "name", None),
-                    "priority": getattr(getattr(fields, "priority", None), "name", None),
-                })
-
-            if len(issues) < page_size:
-                break  # last page
-
-            start_at += page_size
-
-        return results
+        return _execute_jql_query(jql)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to execute JQL: {e}")
+
 
 
 
