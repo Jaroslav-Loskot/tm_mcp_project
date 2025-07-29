@@ -2,7 +2,7 @@ from dataclasses import dataclass
 import json
 import logging
 import time
-from typing import Dict, List, Optional
+from typing import Counter, Dict, List, Optional
 from difflib import get_close_matches
 from fastapi import HTTPException
 from datetime import datetime, timedelta
@@ -318,6 +318,47 @@ def _generate_jql_from_input(
 
     return result
 
+
+def _summarize_jql_query(jql: str) -> Dict:
+    """
+    Executes a JQL query and returns a summary including:
+    - total issue count
+    - number of issues per status
+    """
+    try:
+        max_limit = 100  # Jira Cloud default max page size
+        start_at = 0
+        all_statuses = []
+
+        while True:
+            issues = jira.search_issues(
+                jql_str=jql,
+                startAt=start_at,
+                maxResults=max_limit,
+                fields=["status"],
+                use_post=False  # classic GET-based pagination
+            )
+
+            if not issues:
+                break
+
+            for issue in issues:
+                status = getattr(getattr(issue.fields, "status", None), "name", "Unknown")
+                all_statuses.append(status)
+
+            if len(issues) < max_limit:
+                break  # last page
+
+            start_at += max_limit
+
+        status_counts = Counter(all_statuses)
+        return {
+            "total": sum(status_counts.values()),
+            "statuses": dict(status_counts)
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to summarize JQL: {e}")
 
 
 

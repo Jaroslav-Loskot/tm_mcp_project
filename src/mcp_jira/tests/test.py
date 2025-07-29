@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 
 from mcp_common.utils.bedrock_wrapper import call_claude
-from mcp_jira.helpers import _generate_jql_from_input, _list_projects, _parse_jira_date, _resolve_project_name, extract_issue_fields
+from mcp_jira.helpers import _generate_jql_from_input, _list_projects, _parse_jira_date, _resolve_project_name, _summarize_jql_query, extract_issue_fields
 
 
 load_dotenv(override=True)
@@ -27,5 +27,6 @@ jira = JIRA(server=JIRA_URL, basic_auth=(JIRA_USER, JIRA_TOKEN))
 
 
 # print(list_appsupport_projects())
-print(_generate_jql_from_input("project = ASEAT"))
+# print(_generate_jql_from_input("project = ASEAT"))
+print(_summarize_jql_query("project = ASEAT"))
 

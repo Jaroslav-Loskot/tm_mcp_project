@@ -7,7 +7,7 @@ import json
 import os
 import re
 import textwrap
-from typing import Dict, List, Optional
+from typing import Counter, Dict, List, Optional
 from fastapi import HTTPException, APIRouter 
 from fastmcp import FastMCP
 from jira import JIRA
@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 
 
 from mcp_common.utils.bedrock_wrapper import call_claude
-from mcp_jira.helpers import _generate_jql_from_input, _list_projects, _parse_jira_date, _resolve_project_name, extract_issue_fields
+from mcp_jira.helpers import _generate_jql_from_input, _list_projects, _parse_jira_date, _resolve_project_name, _summarize_jql_query, extract_issue_fields
 
 
 load_dotenv(override=True)
@@ -197,7 +197,7 @@ def generate_jql_from_input(user_input: str) -> dict:
 @mcp.tool
 def execute_jql_query(jql: str) -> List[Dict]:
     """
-    Executes a JQL query and returns up to 100 matching issues using Jira Cloud's enhanced search.
+    Executes a JQL query and returns all matching issues using Jira Cloud's pagination.
 
     Returns the following fields:
     - key
@@ -212,35 +212,45 @@ def execute_jql_query(jql: str) -> List[Dict]:
     - priority
     """
     try:
-        max_limit = 100
         results = []
+        start_at = 0
+        page_size = 100
 
-        response = jira.search_issues(
-            jql_str=jql,
-            startAt=0,
-            maxResults=max_limit,
-            fields=[
-                "summary", "issuetype", "status", "assignee",
-                "created", "updated", "project", "resolution", "priority"
-            ],
-            expand=None,
-            use_post=True  # Required for Jira Cloud
-        )
+        while True:
+            issues = jira.search_issues(
+                jql_str=jql,
+                startAt=start_at,
+                maxResults=page_size,
+                fields=[
+                    "summary", "issuetype", "status", "assignee",
+                    "created", "updated", "project", "resolution", "priority"
+                ],
+                expand=None,
+                use_post=False  # Enable pagination support
+            )
 
-        for issue in response:
-            fields = issue.fields
-            results.append({
-                "key": issue.key,
-                "summary": getattr(fields, "summary", None),
-                "issue_type": getattr(getattr(fields, "issuetype", None), "name", None),
-                "status": getattr(getattr(fields, "status", None), "name", None),
-                "assignee": getattr(getattr(fields, "assignee", None), "displayName", None),
-                "created": getattr(fields, "created", None),
-                "updated": getattr(fields, "updated", None),
-                "project": getattr(getattr(fields, "project", None), "key", None),
-                "resolution": getattr(getattr(fields, "resolution", None), "name", None),
-                "priority": getattr(getattr(fields, "priority", None), "name", None),
-            })
+            if not issues:
+                break
+
+            for issue in issues:
+                fields = issue.fields
+                results.append({
+                    "key": issue.key,
+                    "summary": getattr(fields, "summary", None),
+                    "issue_type": getattr(getattr(fields, "issuetype", None), "name", None),
+                    "status": getattr(getattr(fields, "status", None), "name", None),
+                    "assignee": getattr(getattr(fields, "assignee", None), "displayName", None),
+                    "created": getattr(fields, "created", None),
+                    "updated": getattr(fields, "updated", None),
+                    "project": getattr(getattr(fields, "project", None), "key", None),
+                    "resolution": getattr(getattr(fields, "resolution", None), "name", None),
+                    "priority": getattr(getattr(fields, "priority", None), "name", None),
+                })
+
+            if len(issues) < page_size:
+                break  # last page
+
+            start_at += page_size
 
         return results
 
@@ -249,7 +259,18 @@ def execute_jql_query(jql: str) -> List[Dict]:
 
 
 
+@mcp.tool
+def summarize_jql_query(jql: str) -> Dict:
+    """
+    Executes a JQL query and returns a summary including:
+    - total issue count
+    - number of issues per status
+    """
+    try:
+        return _summarize_jql_query(jql)
 
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to summarize JQL: {e}")
 
 
 @mcp.tool()
