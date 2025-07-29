@@ -13,6 +13,7 @@ from fastmcp import FastMCP
 from jira import JIRA
 from dotenv import load_dotenv
 
+
 from mcp_common.utils.bedrock_wrapper import call_claude
 from mcp_jira.helpers import _generate_jql_from_input, _list_projects, _parse_jira_date, _resolve_project_name, extract_issue_fields
 
@@ -180,23 +181,25 @@ def parse_jira_date(input_str: str) -> str:
 @mcp.tool
 def generate_jql_from_input(user_input: str) -> dict:
     """
-    Generates a JSON object containing:
-    - a valid JQL query using only project, priority, and resolution status (resolved/unresolved/all)
-    - an optional max_results value if the user requests a limit
+    Generates a valid JQL query using only project, priority, and resolution status (resolved/unresolved/all).
     """
-    result = _generate_jql_from_input(
-        user_input="open high priority tickets",
+    raw = _generate_jql_from_input(
+        user_input=user_input,
         category_filter=DEFAULT_CATEGORY or None,
         exclude_projects=EXCLUDED_KEYS or None
-)
+    )
+    
+    return {
+        "jql": raw["jql"]
+    }
 
 
 @mcp.tool
 def execute_jql_query(jql: str) -> List[Dict]:
     """
-    Executes a JQL query and returns up to 100 matching issues (paginated internally).
-    
-    Fields returned per issue:
+    Executes a JQL query and returns up to 100 matching issues using Jira Cloud's enhanced search.
+
+    Returns the following fields:
     - key
     - summary
     - issue_type
@@ -207,57 +210,44 @@ def execute_jql_query(jql: str) -> List[Dict]:
     - project
     - resolution
     - priority
-
-    Parameters:
-    - jql: The Jira Query Language string.
-
-    Returns:
-    - List of up to 100 issues in compact format.
     """
     try:
-        start_at = 0
-        page_size = 50  # can be tuned if needed
-        total_collected = 0
         max_limit = 100
         results = []
 
-        while total_collected < max_limit:
-            remaining = max_limit - total_collected
-            page = jira.search_issues(
-                jql,
-                startAt=start_at,
-                maxResults=min(page_size, remaining),
-                expand="names"
-            )
+        response = jira.search_issues(
+            jql_str=jql,
+            startAt=0,
+            maxResults=max_limit,
+            fields=[
+                "summary", "issuetype", "status", "assignee",
+                "created", "updated", "project", "resolution", "priority"
+            ],
+            expand=None,
+            use_post=True  # Required for Jira Cloud
+        )
 
-            for issue in page:
-                fields = issue.fields
-                results.append({
-                    "key": issue.key,
-                    "summary": fields.summary,
-                    "issue_type": getattr(fields.issuetype, "name", None),
-                    "status": getattr(fields.status, "name", None),
-                    "assignee": getattr(fields.assignee, "displayName", None) if fields.assignee else None,
-                    "created": fields.created,
-                    "updated": fields.updated,
-                    "project": getattr(fields.project, "key", None),
-                    "resolution": getattr(fields.resolution, "name", None) if fields.resolution else None,
-                    "priority": getattr(fields.priority, "name", None) if fields.priority else None,
-                })
-                total_collected += 1
-
-                if total_collected >= max_limit:
-                    break
-
-            if len(page) < page_size:
-                break  # no more pages
-
-            start_at += page_size
+        for issue in response:
+            fields = issue.fields
+            results.append({
+                "key": issue.key,
+                "summary": getattr(fields, "summary", None),
+                "issue_type": getattr(getattr(fields, "issuetype", None), "name", None),
+                "status": getattr(getattr(fields, "status", None), "name", None),
+                "assignee": getattr(getattr(fields, "assignee", None), "displayName", None),
+                "created": getattr(fields, "created", None),
+                "updated": getattr(fields, "updated", None),
+                "project": getattr(getattr(fields, "project", None), "key", None),
+                "resolution": getattr(getattr(fields, "resolution", None), "name", None),
+                "priority": getattr(getattr(fields, "priority", None), "name", None),
+            })
 
         return results
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to execute JQL: {e}")
+
+
 
 
 

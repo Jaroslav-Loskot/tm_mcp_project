@@ -279,13 +279,12 @@ def _generate_jql_from_input(
         "   - Omit resolution condition if the user meant 'all' issues\n"
         "- If a priority is mentioned, use it in a priority clause.\n"
         "- If no priority is mentioned, omit it.\n"
-        "- If the user input includes a limit (e.g. 'top 10'), extract it as max_results.\n"
-        "- If no limit is mentioned, set max_results to null.\n"
-        "- Return a JSON object ONLY with these fields:\n"
+        "- DO NOT include max_results or any limit fields.\n"
+        "- Return a JSON object ONLY with this field:\n"
         "   - jql: string\n"
-        "   - max_results: integer or null\n"
         "- DO NOT include explanations or markdown, just return the JSON.\n"
     )
+
 
     user_message = f"""
     User Input:
@@ -300,8 +299,7 @@ def _generate_jql_from_input(
     Expected output format:
 
     {{
-      "jql": "<VALID_JQL_STRING>",
-      "max_results": <integer or null>
+      "jql": "<VALID_JQL_STRING>"
     }}
     """
 
@@ -314,8 +312,9 @@ def _generate_jql_from_input(
     except Exception as e:
         raise ValueError(f"Failed to parse Claude's JSON output: {e}\n\nRaw response:\n{response}")
 
-    if not isinstance(result, dict) or "jql" not in result or "max_results" not in result:
+    if not isinstance(result, dict) or "jql" not in result:
         raise ValueError(f"Claude did not return a valid structure: {result}")
+
 
     return result
 
