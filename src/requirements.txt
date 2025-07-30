@@ -3,3 +3,4 @@ fastmcp==2.10.6
 python-dotenv
 jira[cli]
 boto3
+simple-salesforce

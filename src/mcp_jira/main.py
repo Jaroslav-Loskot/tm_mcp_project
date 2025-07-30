@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 
 
 from mcp_common.utils.bedrock_wrapper import call_claude
-from mcp_jira.helpers import _execute_jql_query, _generate_jql_from_input, _list_projects, _parse_jira_date, _resolve_project_name, _summarize_jql_query, extract_issue_fields
+from mcp_jira.helpers import _advanced_search_issues, _analyze_jira_issues_from_jql, _approximate_jira_issue_count, _execute_jql_query, _generate_jql_from_input, _list_projects, _parse_jira_date, _resolve_project_name, _summarize_jira_tickets, _summarize_jql_query, extract_issue_fields
 
 
 load_dotenv(override=True)
@@ -247,166 +247,168 @@ def get_issue_with_comments(key: str) -> dict:
 
 
 @mcp.tool()
-def search_advanced_issues(
+def advanced_search_issues(
     projects: list[str] = [],
-    statuses: list[str] = [],
     priorities: list[str] = [],
-    assignees: list[str] = [],
+    resolved: Optional[bool] = None,
     created_after: str = "",
     updated_after: str = "",
-    max_results: int = 10,
     sort_by: str = "created",
     sort_order: str = "DESC"
 ) -> list[dict]:
     """
-    Search Jira issues using multiple filters:
-    - Accepts lists for projects, statuses, priorities, assignees
-    - Accepts created/updated date ranges in 'YYYY-MM-DD'
-    - Supports sorting by any Jira field
+    Search Jira issues using simplified filters.
 
-    Returns a list of matching issues with key, summary, status, assignee, priority, created, updated.
+    This tool queries Jira using enhanced search and returns issues
+    filtered by project, priority, resolution state, and date ranges.
+
+    Parameters:
+    - projects: List of Jira project keys
+    - priorities: List of priorities to include
+    - resolved: True = resolved, False = unresolved, None = all
+    - created_after: Filter by created >= this date (YYYY-MM-DD)
+    - updated_after: Filter by updated >= this date (YYYY-MM-DD)
+    - sort_by: Jira field to sort by
+    - sort_order: ASC or DESC (default DESC)
+
+    Returns:
+    - A list of issue dicts with basic fields
     """
-    jql_parts = []
-
-    if projects:
-        quoted = [f'"{p}"' for p in projects]
-        jql_parts.append(f'project IN ({", ".join(quoted)})')
-    if statuses:
-        quoted = [f'"{s}"' for s in statuses]
-        jql_parts.append(f'status IN ({", ".join(quoted)})')
-    if priorities:
-        quoted = [f'"{p}"' for p in priorities]
-        jql_parts.append(f'priority IN ({", ".join(quoted)})')
-    if assignees:
-        quoted = [f'"{a}"' for a in assignees]
-        jql_parts.append(f'assignee IN ({", ".join(quoted)})')
-    if created_after:
-        jql_parts.append(f'created >= "{created_after}"')
-    if updated_after:
-        jql_parts.append(f'updated >= "{updated_after}"')
-
-    # Validate sort order
-    order = sort_order.upper()
-    if order not in ["ASC", "DESC"]:
-        order = "DESC"
-
-    jql = " AND ".join(jql_parts) if jql_parts else ""
-    jql += f' ORDER BY {sort_by} {order}'
-
     try:
-        issues = jira.search_issues(jql, maxResults=max_results)
-        return [
-            {
-                extract_issue_fields(issue)
-            }
-            for issue in issues
-        ]
+        return _advanced_search_issues(
+            projects=projects,
+            priorities=priorities,
+            resolved=resolved,
+            created_after=created_after,
+            updated_after=updated_after,
+            sort_by=sort_by,
+            sort_order=sort_order
+        )
     except Exception as e:
-        return [{"error": str(e), "jql": jql}]
+        return [{"error": str(e)}]
 
+
+
+@mcp.tool()
+def summarize_jira_tickets(ticket_keys: List[str]) -> Dict:
+    """
+    Summarizes a list of Jira tickets with structured headers and intelligent insights.
+
+    For each ticket, returns:
+    - A structured header with Summary, Status, Priority, Assignee, Created, and Updated
+    - A short summary of the ticket content
+    - Latest update
+    - Suggested next step
+
+    Parameters:
+    - ticket_keys: List of Jira ticket keys (e.g., ["PROJ-123", "PROJ-456"])
+
+    Returns:
+    A dictionary where each key is a ticket key and the value is the generated summary string.
+    """
+    try:
+        return _summarize_jira_tickets(ticket_keys)
+    except Exception as e:
+        return {"error": f"Failed to summarize Jira tickets: {str(e)}"}
+
+
+@mcp.tool()
+def approximate_jira_issue_count(jql: str) -> Dict:
+    """
+    Executes a JQL query and returns an approximate count of matching Jira issues.
+
+    Parameters:
+    - jql: A valid Jira Query Language string (e.g., 'project = PROJ AND status = "To Do"')
+
+    Returns:
+    - A dictionary with:
+      {
+        "jql": "<original input>",
+        "approximate_count": <int>
+      }
+
+    Or if there's an error:
+      {
+        "error": "...",
+        "jql": "<original input>"
+      }
+    """
+    return _approximate_jira_issue_count(jql)
 
 
 @mcp.tool
-def summarize_jira_tickets(ticket_keys: List[str]) -> Dict:
+def analyze_jira_issues(jql: str) -> Dict:
     """
-    Fetches key details and comments for each Jira ticket, then summarizes them using LLM.
+    Analyze Jira issues matching a JQL query and return aggregated statistics.
+
+    Parameters:
+    - jql: Jira Query Language string (e.g., 'project = ASEAT AND resolution IS NOT EMPTY')
 
     Returns:
-    - executive_summary: high-level overview of all tickets
-    - ticket_summaries: mapping of ticket key to its summary
+    A dictionary with the following fields:
+    - jql: the input JQL string
+    - total_issues: total number of matching issues
+    - status_counts: number of issues grouped by status
+    - priority_counts: number of issues grouped by priority
+    - assignee_counts: number of issues grouped by assignee
+    - average_resolution_time_by_priority_for_incident_sla: average resolution time in **days**
+      grouped by priority, but only for issues of type "Incident SLA"
+
+    Example:
+    {
+        "jql": "...",
+        "total_issues": 134,
+        "status_counts": {"To Do": 42, "In Progress": 54, ...},
+        "priority_counts": {"High": 70, "Medium": 50, ...},
+        "assignee_counts": {"John Doe": 30, "Unassigned": 20, ...},
+        "average_resolution_time_by_priority_for_incident_sla": {"High": 2.8, "Medium": 5.1}
+    }
+
+    Notes:
+    - Resolution time is calculated as the time between `created` and `resolutiondate`
+    - Only resolved issues contribute to average resolution time
+    - The resolution time by priority is limited to issues of type "Incident SLA"
     """
-    try:
-        ticket_data = []
+    return _analyze_jira_issues_from_jql(jql)
 
-        for key in ticket_keys:
-            try:
-                issue = jira.issue(key, expand="renderedFields")
-                comments = jira.comments(key)
 
-                summary = issue.fields.summary
-                status = issue.fields.status.name
-                priority = getattr(issue.fields.priority, "name", None)
-                assignee = getattr(issue.fields.assignee, "displayName", None)
-                created = issue.fields.created
-                updated = issue.fields.updated
-                description = issue.fields.description or ""
+def summarize_jira_tickets_sequential(ticket_keys: List[str], delay: float = 1.5) -> Dict:
+    """
+    Summarize multiple Jira tickets one-by-one with a delay between LLM calls to avoid overload.
 
-                comment_text = "\n".join(
-                    f"{c.author.displayName}: {c.body}" for c in comments
-                )
+    Parameters:
+    - ticket_keys: List of Jira ticket keys (e.g., ["ASEAT-123", "ASUCIT-456"])
+    - delay: Optional delay in seconds between calls (default: 1.5s)
 
-                ticket_data.append({
-                    "key": key,
-                    "summary": summary,
-                    "status": status,
-                    "priority": priority,
-                    "assignee": assignee,
-                    "created": created,
-                    "updated": updated,
-                    "description": description,
-                    "comments": comment_text
-                })
-            except Exception as e:
-                ticket_data.append({
-                    "key": key,
-                    "error": f"Failed to fetch ticket: {str(e)}"
-                })
+    Returns:
+    A dictionary mapping ticket keys to summaries, or an error dictionary if a problem occurred.
 
-        # Prepare input for LLM
-        formatted_input = "\n\n".join([
-            textwrap.dedent(f"""
-            Ticket {t['key']}:
-            Summary: {t.get('summary', '')}
-            Status: {t.get('status', '')}
-            Priority: {t.get('priority', '')}
-            Assignee: {t.get('assignee', '')}
-            Created: {t.get('created', '')}
-            Updated: {t.get('updated', '')}
+    Each summary includes:
+    - Summary
+    - Status
+    - Priority
+    - Assignee
+    - Created
+    - Updated
+    - Short description of issue
+    - Latest comment or update
+    - Suggested next step
 
-            Description:
-            {t.get('description', '')}
+    Example:
+    {
+        "ASEAT-123": "Summary: ...\nStatus: ...\nPriority: ...\n...",
+        ...
+    }
 
-            Comments:
-            {t.get('comments', '')}
-            """).strip()
-            for t in ticket_data if "error" not in t
-        ])
-
-        system_prompt = (
-            "You are an expert Jira analyst. The user will provide raw issue data including "
-            "summaries, statuses, priorities, and comments.\n\n"
-            "Your task:\n"
-            "1. Write a high-level 'executive_summary' that captures important patterns, updates, progress, blockers, or risks across all tickets.\n"
-            "2. For each ticket, return a concise summary (2–4 sentences) under 'ticket_summaries' keyed by ticket ID.\n\n"
-            "FORMAT:\n"
-            "{\n"
-            "  \"executive_summary\": \"...\",\n"
-            "  \"ticket_summaries\": {\n"
-            "    \"TICKET-123\": \"summary...\",\n"
-            "    \"TICKET-456\": \"summary...\"\n"
-            "  }\n"
-            "}\n"
-            "- Return ONLY valid JSON. Do not include markdown, comments, or explanation.\n"
-            "- Ensure all JSON is syntactically correct (no trailing commas, correct quoting, etc.)."
-        )
-
-        user_input = f"""
-        Here is the data for multiple Jira tickets:
-
-        {formatted_input}
-        """
-
-        response = call_claude(system_prompt=system_prompt, user_input=user_input)
-        fenced = re.search(r"\{.*\}", response, re.DOTALL)
-        response_json = fenced.group(0) if fenced else response
-
-        return json.loads(response_json)
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to summarize Jira tickets: {e}")
-    
-
+    Notes:
+    - Each ticket is summarized individually via LLM with a short wait between them.
+    - Invalid or failed tickets are skipped.
+    - This is useful when you want stable results across many tickets.
+    """
+    return summarize_jira_tickets_sequential(ticket_keys, delay=delay)
 
 
 if __name__ == "__main__":
     mcp.run(transport="sse", host="0.0.0.0", port=8100)  # run 'fastmcp run main.py --transport sse --port 8100'
+
+
