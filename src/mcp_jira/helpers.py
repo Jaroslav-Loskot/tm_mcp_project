@@ -234,7 +234,7 @@ def _list_projects() -> list[dict]:
 def _generate_jql_from_input(
     user_input: str,
     category_filter: Optional[str] = os.getenv("DEFAULT_PROJECT_CATEGORY"),
-    exclude_projects: Optional[List[str]] = os.getenv("EXCLUDED_PROJECT_KEYS", "")
+    exclude_projects: Optional[List[str]] = os.getenv("EXCLUDED_PROJECT_KEYS", "").split(",")
 ) -> dict:
     """
     Converts natural language input into JQL using Claude.
@@ -256,7 +256,7 @@ def _generate_jql_from_input(
             if p.get("category", "").lower() == category_filter.lower()
         ]
 
-    # Optional: Exclude project keys
+    # Filter out excluded projects
     if exclude_projects:
         all_projects = [
             p for p in all_projects
@@ -267,9 +267,8 @@ def _generate_jql_from_input(
         raise ValueError("No allowed projects after applying filters.")
 
     allowed_project_keys = [p["key"] for p in all_projects]
-    allowed_priorities = get_all_jira_priorities()  # e.g., ["High", "Medium", "Low"]
+    allowed_priorities = get_all_jira_priorities()
 
-    # Build key-name mapping string
     project_map_str = "\n".join([f"{p['key']}: {p['name']}" for p in all_projects])
 
     system_prompt = (
@@ -293,36 +292,35 @@ def _generate_jql_from_input(
         "- DO NOT include explanations or markdown, just return the JSON.\n"
     )
 
-    user_message = f"""
-    User Input:
+    user_prompt = f"""User Query:
     {user_input}
 
-    Available projects (format = KEY: NAME):
+    Available Projects:
     {project_map_str}
 
-    Allowed priorities:
-    {', '.join(allowed_priorities)}
-
-    Expected output format:
-
-    {{
-      "jql": "<VALID_JQL_STRING>"
-    }}
+    Allowed Priorities:
+    {", ".join(allowed_priorities)}
     """
 
-    response = call_claude(system_prompt, user_message).strip()
+    response = call_nova_lite(system_prompt + "\n" + user_prompt)
 
-    try:
-        fenced = re.search(r"\{.*\}", response, re.DOTALL)
-        response_json = fenced.group(0) if fenced else response
-        result = json.loads(response_json)
-    except Exception as e:
-        raise ValueError(f"Failed to parse Claude's JSON output: {e}\n\nRaw response:\n{response}")
+    match = re.search(r'\{.*\}', response, re.DOTALL)
+    result = json.loads(match.group(0)) if match else json.loads(response)
 
-    if not isinstance(result, dict) or "jql" not in result:
-        raise ValueError(f"Claude did not return a valid structure: {result}")
+    generated_jql = result["jql"]
 
-    return result
+    # Always enforce project IN and NOT IN
+    project_in_clause = f"project IN ({', '.join(f"'{k}'" for k in allowed_project_keys)})"
+    project_not_in_clause = ""
+    if exclude_projects:
+        excluded_clean = [p for p in exclude_projects if p]
+        if excluded_clean:
+            project_not_in_clause = f" AND project NOT IN ({', '.join(f"'{p}'" for p in excluded_clean)})"
+
+    full_jql = f"{project_in_clause}{project_not_in_clause} AND ({generated_jql})"
+
+    return {"jql": full_jql}
+
 
 def _summarize_jql_query(jql: str) -> Dict:
     """

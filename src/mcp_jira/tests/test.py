@@ -44,7 +44,7 @@ list = [
 
 # print(_summarize_jira_tickets(list))
 
-jql = _generate_jql_from_input("Erste Austria resolved tickets")
+jql = _generate_jql_from_input("Erste Austria critical prirority")
 print(jql)
 # print(_approximate_jira_issue_count(jql['jql']))
-print(_analyze_jira_issues_from_jql(jql['jql']))
+# print(_analyze_jira_issues_from_jql(jql['jql']))
