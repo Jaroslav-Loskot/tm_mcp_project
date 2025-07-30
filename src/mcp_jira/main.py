@@ -3,6 +3,9 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 
+import mcp_jira.helpers as helpers
+
+
 import json
 import os
 import re
@@ -15,8 +18,6 @@ from dotenv import load_dotenv
 
 
 from mcp_common.utils.bedrock_wrapper import call_claude
-from mcp_jira.helpers import _approximate_jira_issue_count, _execute_jql_query, _generate_jql_from_input, _list_projects, _parse_jira_date, _resolve_project_name, _summarize_and_analyze_jql, extract_issue_fields
-
 
 load_dotenv(override=True)
 
@@ -78,7 +79,7 @@ def list_projects() -> list[dict]:
     List Jira projects visible to the current user.
 
     """
-    return _list_projects()
+    return helpers._list_projects()
 
 
 @mcp.tool
@@ -110,8 +111,8 @@ def resolve_project_name(human_input: str) -> List[Dict[str, str]]:
     Returns:
     - The matching Jira project name (e.g., 'Website Comapny'), or raises error if not found or invalid.
     """
-
-    return _resolve_project_name(human_input, DEFAULT_CATEGORY)
+    
+    return helpers._resolve_project_name(human_input, DEFAULT_CATEGORY)
 
 
 
@@ -176,26 +177,33 @@ def parse_jira_date(input_str: str) -> str:
     Returns:
     - A formatted date string in YYYY-MM-DD format.
     """
-    return _parse_jira_date(input_str)
+    return helpers._parse_jira_date(input_str)
 
 @mcp.tool
 def generate_jql_from_input(user_input: str) -> dict:
     """
-    Generate a valid Jira JQL string from natural language input using AI assistance.
+    Generate a valid Jira JQL string from natural language input using AI assistance,
+    and estimate how many issues match that JQL.
 
     Parameters:
     - user_input: Free-form text like "all high priority tickets from last month"
 
     Returns:
     A dictionary with:
-    - jql: the generated JQL string including project/category filters and proper syntax
-
-    Notes:
-    - The tool infers whether to use `created` or `updated` dates based on wording.
-    - It automatically includes allowed projects and excludes excluded ones.
-    - It never generates JQL manually but delegates the conversion to an AI model.
+    - jql: the generated JQL string with filters applied
+    - approx_query_results: estimated number of matching issues
     """
-    return _generate_jql_from_input(user_input=user_input)
+    result = helpers._generate_jql_from_input(user_input=user_input)
+    jql = result.get("jql", "")
+
+    estimate = helpers._approximate_jira_issue_count(jql)
+    count = estimate.get("approximate_count", -1)
+
+    return {
+        "jql": jql,
+        "approx_query_results": count
+    }
+
 
 
 @mcp.tool
@@ -216,7 +224,7 @@ def execute_jql_query(jql: str) -> List[Dict]:
     - priority
     """
     try:
-        return _execute_jql_query(jql)
+        return helpers._execute_jql_query(jql)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to execute JQL: {e}")
@@ -228,47 +236,23 @@ def execute_jql_query(jql: str) -> List[Dict]:
 @mcp.tool
 def summarize_and_analyze_jira_issues(jql: str) -> Dict:
     """
-    Summarize and analyze Jira issues matching a JQL query with detailed statistics.
+    Summarize Jira issues matching a JQL query, grouped per project.
 
     Parameters:
     - jql: A Jira Query Language string (e.g., 'project = ASEAT AND resolution = Unresolved')
 
     Returns:
-    A dictionary with the following fields:
-    - jql: the input JQL string
-    - total_issues: total number of issues matching the JQL
-    - total_unresolved_issues: how many of them are unresolved
-    - status_counts: all status counts for all matching issues
-    - priority_counts: all priority counts for all matching issues
-    - assignee_counts: all assignee counts for all matching issues
-    - unresolved_global_by_priority: unresolved issues grouped by priority
-    - unresolved_global_by_status: unresolved issues grouped by status
-    - unresolved_global_by_assignee: unresolved issues grouped by assignee
-    - per_project: for each project key:
-        - project_name: the name of the project
-        - total: total issues in that project
-        - unresolved_by_priority: unresolved issues grouped by priority
-        - unresolved_by_status: unresolved issues grouped by status
-        - unresolved_by_assignee: unresolved issues grouped by assignee
-        - unresolved_ratio: proportion of unresolved to total issues
-        - average_resolution_time_by_priority_for_incident_sla: avg days for "Incident SLA" issues grouped by priority
-    - average_resolution_time_by_priority_for_incident_sla: global average resolution time for "Incident SLA" issues
-    - generated_at: ISO timestamp of when this summary was generated
+    A dictionary where each key is a Jira project key, and value includes:
+    - project_name: name of the project
+    - total_issues: total tickets in that project
+    - unresolved_issues: number of unresolved tickets
+    - by_priority: all issues grouped by priority
+    - by_status: all issues grouped by status
+    - by_assignee: all issues grouped by assignee
+    - incident_sla_count_by_priority: number of Incident SLA tickets by priority
+    - incident_sla_avg_resolution_by_priority: average resolution time in days for Incident SLA by priority
     """
-    return _summarize_and_analyze_jql(jql)
-
-
-@mcp.tool()
-def get_issue_with_comments(key: str) -> dict:
-    """
-    Retrieve full Jira issue info with cleaned comments, priority, and task type.
-    """
-    try:
-        issue = jira.issue(key)
-        return extract_issue_fields(issue, include_comments=True, jira_client=jira)
-    except Exception as e:
-        return {"error": str(e)}
-
+    return helpers._summarize_and_analyze_jql(jql)
 
 
 # @mcp.tool()
@@ -314,27 +298,27 @@ def get_issue_with_comments(key: str) -> dict:
 
 
 
-# @mcp.tool()
-# def summarize_jira_tickets(ticket_keys: List[str]) -> Dict:
-#     """
-#     Summarizes a list of Jira tickets with structured headers and intelligent insights.
+@mcp.tool()
+def get_tickets_insights(ticket_keys: List[str]) -> Dict:
+    """
+    Generates intelligent insights and structured summaries for a list of Jira tickets.
 
-#     For each ticket, returns:
-#     - A structured header with Summary, Status, Priority, Assignee, Created, and Updated
-#     - A short summary of the ticket content
-#     - Latest update
-#     - Suggested next step
+    For each ticket, the summary includes:
+    - A structured header with key metadata (Summary, Status, Priority, Assignee, Created, Updated)
+    - A short summary of the ticket's purpose or issue
+    - The most recent update (based on comments)
+    - A suggested next step
 
-#     Parameters:
-#     - ticket_keys: List of Jira ticket keys (e.g., ["PROJ-123", "PROJ-456"])
+    Parameters:
+    - ticket_keys: List of Jira ticket keys (e.g., ["PROJ-123", "PROJ-456"])
 
-#     Returns:
-#     A dictionary where each key is a ticket key and the value is the generated summary string.
-#     """
-#     try:
-#         return _summarize_jira_tickets(ticket_keys)
-#     except Exception as e:
-#         return {"error": f"Failed to summarize Jira tickets: {str(e)}"}
+    Returns:
+    A dictionary where each key is the ticket key and the value is the generated summary string.
+    If a ticket fails to summarize, an error message is returned instead.
+    """
+    return helpers._get_tickets_insights(ticket_keys)
+
+
 
 
 @mcp.tool()
@@ -358,7 +342,7 @@ def approximate_jira_issue_count(jql: str) -> Dict:
         "jql": "<original input>"
       }
     """
-    return _approximate_jira_issue_count(jql)
+    return helpers._approximate_jira_issue_count(jql)
 
 
 # @mcp.tool
@@ -397,40 +381,36 @@ def approximate_jira_issue_count(jql: str) -> Dict:
 #     return _analyze_jira_issues_from_jql(jql)
 
 
-def summarize_jira_tickets_sequential(ticket_keys: List[str], delay: float = 1.5) -> Dict:
+
+@mcp.tool
+def get_issue_keys(jql: str) -> List[str]:
     """
-    Summarize multiple Jira tickets one-by-one with a delay between LLM calls to avoid overload.
+    Get a list of issue keys matching a given JQL query.
 
     Parameters:
-    - ticket_keys: List of Jira ticket keys (e.g., ["ASEAT-123", "ASUCIT-456"])
-    - delay: Optional delay in seconds between calls (default: 1.5s)
+    - jql: A Jira Query Language string (e.g., 'project = ASEAT AND resolution = Unresolved')
 
     Returns:
-    A dictionary mapping ticket keys to summaries, or an error dictionary if a problem occurred.
-
-    Each summary includes:
-    - Summary
-    - Status
-    - Priority
-    - Assignee
-    - Created
-    - Updated
-    - Short description of issue
-    - Latest comment or update
-    - Suggested next step
-
-    Example:
-    {
-        "ASEAT-123": "Summary: ...\nStatus: ...\nPriority: ...\n...",
-        ...
-    }
-
-    Notes:
-    - Each ticket is summarized individually via LLM with a short wait between them.
-    - Invalid or failed tickets are skipped.
-    - This is useful when you want stable results across many tickets.
+    A list of issue keys that match the query.
     """
-    return summarize_jira_tickets_sequential(ticket_keys, delay=delay)
+    return helpers._get_issue_keys(jql)
+
+
+@mcp.tool
+def extract_issue_fields(ticket_key: str, include_comments: bool = False) -> dict:
+    """
+    Parameters:
+    - ticket_key: Jira issue key (e.g., "PROJ-123")
+    - include_comments: Whether to include cleaned comments
+
+    Returns:
+    A dictionary with issue metadata and optionally comments.
+    """
+    try:
+        issue = jira.issue(ticket_key)
+        return helpers._extract_issue_fields(issue, include_comments=include_comments, jira_client=jira if include_comments else None)
+    except Exception as e:
+        return {"error": f"Failed to extract fields for {ticket_key}: {e}"}
 
 
 if __name__ == "__main__":

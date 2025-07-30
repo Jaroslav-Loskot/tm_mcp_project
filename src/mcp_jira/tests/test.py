@@ -4,7 +4,7 @@ import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
 
-from mcp_jira.helpers import _generate_jql_from_input, _summarize_and_analyze_jql
+from mcp_jira.helpers import _generate_jql_from_input, _get_issue_keys, _summarize_and_analyze_jql
 
 
 
@@ -44,9 +44,9 @@ list = [
 
 # print(_summarize_jira_tickets(list))
 
-jql = _generate_jql_from_input("all open issues from the past two weeks")
+jql = _generate_jql_from_input("all tickets")
 print(jql)
 print("######################")
 # print(_approximate_jira_issue_count(jql['jql']))
-print(_summarize_and_analyze_jql(jql['jql']))
-# print(_analyze_jira_issues_from_jql(jql['jql']))
+# print(_summarize_and_analyze_jql(jql['jql']))
+# print(_get_issue_keys(jql['jql']))
