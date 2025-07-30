@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 
 
 from mcp_common.utils.bedrock_wrapper import call_claude
-from mcp_jira.helpers import _advanced_search_issues, _analyze_jira_issues_from_jql, _approximate_jira_issue_count, _execute_jql_query, _generate_jql_from_input, _list_projects, _parse_jira_date, _resolve_project_name, _summarize_jira_tickets, _summarize_jql_query, extract_issue_fields
+from mcp_jira.helpers import _approximate_jira_issue_count, _execute_jql_query, _generate_jql_from_input, _list_projects, _parse_jira_date, _resolve_project_name, _summarize_and_analyze_jql, extract_issue_fields
 
 
 load_dotenv(override=True)
@@ -181,17 +181,22 @@ def parse_jira_date(input_str: str) -> str:
 @mcp.tool
 def generate_jql_from_input(user_input: str) -> dict:
     """
-    Generates a valid JQL query using only project, priority, and resolution status (resolved/unresolved/all).
+    Generate a valid Jira JQL string from natural language input using AI assistance.
+
+    Parameters:
+    - user_input: Free-form text like "all high priority tickets from last month"
+
+    Returns:
+    A dictionary with:
+    - jql: the generated JQL string including project/category filters and proper syntax
+
+    Notes:
+    - The tool infers whether to use `created` or `updated` dates based on wording.
+    - It automatically includes allowed projects and excludes excluded ones.
+    - It never generates JQL manually but delegates the conversion to an AI model.
     """
-    raw = _generate_jql_from_input(
-        user_input=user_input,
-        category_filter=DEFAULT_CATEGORY or None,
-        exclude_projects=EXCLUDED_KEYS or None
-    )
-    
-    return {
-        "jql": raw["jql"]
-    }
+    return _generate_jql_from_input(user_input=user_input)
+
 
 @mcp.tool
 def execute_jql_query(jql: str) -> List[Dict]:
@@ -219,18 +224,38 @@ def execute_jql_query(jql: str) -> List[Dict]:
 
 
 
-@mcp.tool
-def summarize_jql_query(jql: str) -> Dict:
-    """
-    Executes a JQL query and returns a summary including:
-    - total issue count
-    - number of issues per status
-    """
-    try:
-        return _summarize_jql_query(jql)
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to summarize JQL: {e}")
+@mcp.tool
+def summarize_and_analyze_jira_issues(jql: str) -> Dict:
+    """
+    Summarize and analyze Jira issues matching a JQL query with detailed statistics.
+
+    Parameters:
+    - jql: A Jira Query Language string (e.g., 'project = ASEAT AND resolution = Unresolved')
+
+    Returns:
+    A dictionary with the following fields:
+    - jql: the input JQL string
+    - total_issues: total number of issues matching the JQL
+    - total_unresolved_issues: how many of them are unresolved
+    - status_counts: all status counts for all matching issues
+    - priority_counts: all priority counts for all matching issues
+    - assignee_counts: all assignee counts for all matching issues
+    - unresolved_global_by_priority: unresolved issues grouped by priority
+    - unresolved_global_by_status: unresolved issues grouped by status
+    - unresolved_global_by_assignee: unresolved issues grouped by assignee
+    - per_project: for each project key:
+        - project_name: the name of the project
+        - total: total issues in that project
+        - unresolved_by_priority: unresolved issues grouped by priority
+        - unresolved_by_status: unresolved issues grouped by status
+        - unresolved_by_assignee: unresolved issues grouped by assignee
+        - unresolved_ratio: proportion of unresolved to total issues
+        - average_resolution_time_by_priority_for_incident_sla: avg days for "Incident SLA" issues grouped by priority
+    - average_resolution_time_by_priority_for_incident_sla: global average resolution time for "Incident SLA" issues
+    - generated_at: ISO timestamp of when this summary was generated
+    """
+    return _summarize_and_analyze_jql(jql)
 
 
 @mcp.tool()
@@ -246,70 +271,70 @@ def get_issue_with_comments(key: str) -> dict:
 
 
 
-@mcp.tool()
-def advanced_search_issues(
-    projects: list[str] = [],
-    priorities: list[str] = [],
-    resolved: Optional[bool] = None,
-    created_after: str = "",
-    updated_after: str = "",
-    sort_by: str = "created",
-    sort_order: str = "DESC"
-) -> list[dict]:
-    """
-    Search Jira issues using simplified filters.
+# @mcp.tool()
+# def advanced_search_issues(
+#     projects: list[str] = [],
+#     priorities: list[str] = [],
+#     resolved: Optional[bool] = None,
+#     created_after: str = "",
+#     updated_after: str = "",
+#     sort_by: str = "created",
+#     sort_order: str = "DESC"
+# ) -> list[dict]:
+#     """
+#     Search Jira issues using simplified filters.
 
-    This tool queries Jira using enhanced search and returns issues
-    filtered by project, priority, resolution state, and date ranges.
+#     This tool queries Jira using enhanced search and returns issues
+#     filtered by project, priority, resolution state, and date ranges.
 
-    Parameters:
-    - projects: List of Jira project keys
-    - priorities: List of priorities to include
-    - resolved: True = resolved, False = unresolved, None = all
-    - created_after: Filter by created >= this date (YYYY-MM-DD)
-    - updated_after: Filter by updated >= this date (YYYY-MM-DD)
-    - sort_by: Jira field to sort by
-    - sort_order: ASC or DESC (default DESC)
+#     Parameters:
+#     - projects: List of Jira project keys
+#     - priorities: List of priorities to include
+#     - resolved: True = resolved, False = unresolved, None = all
+#     - created_after: Filter by created >= this date (YYYY-MM-DD)
+#     - updated_after: Filter by updated >= this date (YYYY-MM-DD)
+#     - sort_by: Jira field to sort by
+#     - sort_order: ASC or DESC (default DESC)
 
-    Returns:
-    - A list of issue dicts with basic fields
-    """
-    try:
-        return _advanced_search_issues(
-            projects=projects,
-            priorities=priorities,
-            resolved=resolved,
-            created_after=created_after,
-            updated_after=updated_after,
-            sort_by=sort_by,
-            sort_order=sort_order
-        )
-    except Exception as e:
-        return [{"error": str(e)}]
+#     Returns:
+#     - A list of issue dicts with basic fields
+#     """
+#     try:
+#         return _advanced_search_issues(
+#             projects=projects,
+#             priorities=priorities,
+#             resolved=resolved,
+#             created_after=created_after,
+#             updated_after=updated_after,
+#             sort_by=sort_by,
+#             sort_order=sort_order
+#         )
+#     except Exception as e:
+#         return [{"error": str(e)}]
 
 
 
-@mcp.tool()
-def summarize_jira_tickets(ticket_keys: List[str]) -> Dict:
-    """
-    Summarizes a list of Jira tickets with structured headers and intelligent insights.
+# @mcp.tool()
+# def summarize_jira_tickets(ticket_keys: List[str]) -> Dict:
+#     """
+#     Summarizes a list of Jira tickets with structured headers and intelligent insights.
 
-    For each ticket, returns:
-    - A structured header with Summary, Status, Priority, Assignee, Created, and Updated
-    - A short summary of the ticket content
-    - Latest update
-    - Suggested next step
+#     For each ticket, returns:
+#     - A structured header with Summary, Status, Priority, Assignee, Created, and Updated
+#     - A short summary of the ticket content
+#     - Latest update
+#     - Suggested next step
 
-    Parameters:
-    - ticket_keys: List of Jira ticket keys (e.g., ["PROJ-123", "PROJ-456"])
+#     Parameters:
+#     - ticket_keys: List of Jira ticket keys (e.g., ["PROJ-123", "PROJ-456"])
 
-    Returns:
-    A dictionary where each key is a ticket key and the value is the generated summary string.
-    """
-    try:
-        return _summarize_jira_tickets(ticket_keys)
-    except Exception as e:
-        return {"error": f"Failed to summarize Jira tickets: {str(e)}"}
+#     Returns:
+#     A dictionary where each key is a ticket key and the value is the generated summary string.
+#     """
+#     try:
+#         return _summarize_jira_tickets(ticket_keys)
+#     except Exception as e:
+#         return {"error": f"Failed to summarize Jira tickets: {str(e)}"}
 
 
 @mcp.tool()
@@ -336,40 +361,40 @@ def approximate_jira_issue_count(jql: str) -> Dict:
     return _approximate_jira_issue_count(jql)
 
 
-@mcp.tool
-def analyze_jira_issues(jql: str) -> Dict:
-    """
-    Analyze Jira issues matching a JQL query and return aggregated statistics.
+# @mcp.tool
+# def analyze_jira_issues(jql: str) -> Dict:
+#     """
+#     Analyze Jira issues matching a JQL query and return aggregated statistics.
 
-    Parameters:
-    - jql: Jira Query Language string (e.g., 'project = ASEAT AND resolution IS NOT EMPTY')
+#     Parameters:
+#     - jql: Jira Query Language string (e.g., 'project = ASEAT AND resolution IS NOT EMPTY')
 
-    Returns:
-    A dictionary with the following fields:
-    - jql: the input JQL string
-    - total_issues: total number of matching issues
-    - status_counts: number of issues grouped by status
-    - priority_counts: number of issues grouped by priority
-    - assignee_counts: number of issues grouped by assignee
-    - average_resolution_time_by_priority_for_incident_sla: average resolution time in **days**
-      grouped by priority, but only for issues of type "Incident SLA"
+#     Returns:
+#     A dictionary with the following fields:
+#     - jql: the input JQL string
+#     - total_issues: total number of matching issues
+#     - status_counts: number of issues grouped by status
+#     - priority_counts: number of issues grouped by priority
+#     - assignee_counts: number of issues grouped by assignee
+#     - average_resolution_time_by_priority_for_incident_sla: average resolution time in **days**
+#       grouped by priority, but only for issues of type "Incident SLA"
 
-    Example:
-    {
-        "jql": "...",
-        "total_issues": 134,
-        "status_counts": {"To Do": 42, "In Progress": 54, ...},
-        "priority_counts": {"High": 70, "Medium": 50, ...},
-        "assignee_counts": {"John Doe": 30, "Unassigned": 20, ...},
-        "average_resolution_time_by_priority_for_incident_sla": {"High": 2.8, "Medium": 5.1}
-    }
+#     Example:
+#     {
+#         "jql": "...",
+#         "total_issues": 134,
+#         "status_counts": {"To Do": 42, "In Progress": 54, ...},
+#         "priority_counts": {"High": 70, "Medium": 50, ...},
+#         "assignee_counts": {"John Doe": 30, "Unassigned": 20, ...},
+#         "average_resolution_time_by_priority_for_incident_sla": {"High": 2.8, "Medium": 5.1}
+#     }
 
-    Notes:
-    - Resolution time is calculated as the time between `created` and `resolutiondate`
-    - Only resolved issues contribute to average resolution time
-    - The resolution time by priority is limited to issues of type "Incident SLA"
-    """
-    return _analyze_jira_issues_from_jql(jql)
+#     Notes:
+#     - Resolution time is calculated as the time between `created` and `resolutiondate`
+#     - Only resolved issues contribute to average resolution time
+#     - The resolution time by priority is limited to issues of type "Incident SLA"
+#     """
+#     return _analyze_jira_issues_from_jql(jql)
 
 
 def summarize_jira_tickets_sequential(ticket_keys: List[str], delay: float = 1.5) -> Dict:

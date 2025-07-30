@@ -14,6 +14,8 @@ import os
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 import re
+
+import pytz
 from mcp_common.utils.bedrock_wrapper import call_claude, call_nova_lite
 # from mcp_jira.helpers import get_clean_comments_from_issue
 
@@ -247,49 +249,42 @@ def _generate_jql_from_input(
     Returns:
         dict with 'jql'.
     """
-    all_projects = _list_projects()  # [{'key': 'UCB', 'name': 'Unicredit Italy', 'category': 'AppSupport'}, ...]
+    all_projects = _list_projects()
 
-    # Optional: Filter by category
+    # Filter by category if needed
     if category_filter:
-        all_projects = [
-            p for p in all_projects
-            if p.get("category", "").lower() == category_filter.lower()
-        ]
+        all_projects = [p for p in all_projects if p.get("category", "").lower() == category_filter.lower()]
 
     # Filter out excluded projects
-    if exclude_projects:
-        all_projects = [
-            p for p in all_projects
-            if p["key"] not in exclude_projects
-        ]
+    exclude_projects = [p.strip() for p in exclude_projects if p.strip()]
+    allowed_projects = [p for p in all_projects if p["key"] not in exclude_projects]
 
-    if not all_projects:
+    if not allowed_projects:
         raise ValueError("No allowed projects after applying filters.")
 
-    allowed_project_keys = [p["key"] for p in all_projects]
+    allowed_project_keys = [p["key"] for p in allowed_projects]
     allowed_priorities = get_all_jira_priorities()
 
-    project_map_str = "\n".join([f"{p['key']}: {p['name']}" for p in all_projects])
+    project_map_str = "\n".join([f"{p['key']}: {p['name']}" for p in allowed_projects])
 
+    # 📌 System prompt with clear rules for created vs updated
     system_prompt = (
         "You are a Jira assistant that converts natural language requests into structured JSON "
         "for querying Jira issues.\n\n"
         "RULES:\n"
         "- A list of projects is provided in the format '<KEY>: <NAME>'.\n"
-        "- The user may refer to a project by either its key (e.g., 'UCB') or name (e.g., 'Unicredit Italy').\n"
-        "- You must resolve the reference to a project key and use that key in the JQL.\n"
+        "- The user may refer to a project by either its key or name. You must resolve it to a key.\n"
         "- Only use the provided project keys and priorities.\n"
-        "- For issue status, DO NOT use raw status names (like 'In Progress', 'To Do', etc).\n"
-        "- Instead, determine the resolution type from the user input:\n"
-        "   - Use 'resolution = Unresolved' for open/incomplete issues\n"
-        "   - Use 'resolution != Unresolved' for closed/completed issues\n"
-        "   - Omit resolution condition if the user meant 'all' issues\n"
-        "- If a priority is mentioned, use it in a priority clause.\n"
-        "- If no priority is mentioned, omit it.\n"
-        "- DO NOT include max_results or any limit fields.\n"
-        "- Return a JSON object ONLY with this field:\n"
-        "   - jql: string\n"
-        "- DO NOT include explanations or markdown, just return the JSON.\n"
+        "- For issue status, DO NOT use raw status names like 'In Progress'.\n"
+        "- Instead, infer resolution as follows:\n"
+        "   - Use 'resolution in (Unresolved, EMPTY)' **only if** the user asks for open/incomplete tickets.\n"
+        "   - Use 'resolution not in (Unresolved, EMPTY)' **only if** the user asks for closed/completed tickets.\n"
+        "   - Do NOT include resolution condition if the user refers to **all issues**.\n"
+        "- If a priority is mentioned, include it. Otherwise, omit it.\n"
+        "- For date filters:\n"
+        "   - Use **updated >=** only if the user explicitly mentions 'recently updated', 'changed', or 'modified'.\n"
+        "   - Otherwise, always default to **created >=** for expressions like 'last week', 'past 2 months', etc.\n"
+        "- Return ONLY this JSON structure: { \"jql\": \"...\" }"
     )
 
     user_prompt = f"""User Query:
@@ -309,27 +304,35 @@ def _generate_jql_from_input(
 
     generated_jql = result["jql"]
 
-    # Always enforce project IN and NOT IN
+    # Enforce project IN and optional NOT IN clause
     project_in_clause = f"project IN ({', '.join(f"'{k}'" for k in allowed_project_keys)})"
-    project_not_in_clause = ""
-    if exclude_projects:
-        excluded_clean = [p for p in exclude_projects if p]
-        if excluded_clean:
-            project_not_in_clause = f" AND project NOT IN ({', '.join(f"'{p}'" for p in excluded_clean)})"
+    project_not_in_clause = f" AND project NOT IN ({', '.join(f"'{p}'" for p in exclude_projects)})" if exclude_projects else ""
 
-    full_jql = f"{project_in_clause}{project_not_in_clause} AND ({generated_jql})"
+    # Add logic to avoid repeating project clauses
+    if "project" not in generated_jql.lower():
+        full_jql = f"{project_in_clause}{project_not_in_clause} AND ({generated_jql})"
+    else:
+        full_jql = generated_jql
 
     return {"jql": full_jql}
 
 
-def _summarize_jql_query(jql: str) -> Dict:
+def _summarize_jira_issues(jql: str) -> Dict:
     """
-    Executes a JQL query using enhanced search and returns a summary including:
+    Executes a JQL query using enhanced search and returns a detailed summary:
     - total issue count
-    - number of issues per status
+    - total unresolved issue count
+    - global unresolved grouped by priority/status/assignee
+    - per-project:
+        - total issues
+        - unresolved by priority
+        - unresolved by status
+        - unresolved by assignee
+        - unresolved ratio
+    - top 5 projects with most unresolved
     """
     try:
-        all_statuses = []
+        all_issues = []
         next_page_token = None
         max_results = 100
 
@@ -338,27 +341,74 @@ def _summarize_jql_query(jql: str) -> Dict:
                 jql_str=jql,
                 nextPageToken=next_page_token,
                 maxResults=max_results,
-                fields=["status"],
-                use_post=True  # POST required for Jira Cloud
+                fields=["project", "status", "priority", "assignee", "resolution"],
+                use_post=True
             )
+            if not issues:
+                break
 
-            for issue in issues:
-                status = getattr(getattr(issue.fields, "status", None), "name", "Unknown")
-                all_statuses.append(status)
-
-            # Pagination
+            all_issues.extend(issues)
             next_page_token = getattr(issues, "nextPageToken", None)
             if not next_page_token:
                 break
 
-        status_counts = Counter(all_statuses)
+        total_issues = len(all_issues)
+        unresolved_issues = [i for i in all_issues if not getattr(i.fields, "resolution", None)]
+
+        global_unresolved_by_priority = Counter()
+        global_unresolved_by_status = Counter()
+        global_unresolved_by_assignee = Counter()
+
+        per_project_data = defaultdict(lambda: {
+            "total": 0,
+            "unresolved_by_priority": Counter(),
+            "unresolved_by_status": Counter(),
+            "unresolved_by_assignee": Counter()
+        })
+
+        for issue in all_issues:
+            project_key = getattr(issue.fields.project, "key", "UNKNOWN")
+            per_project_data[project_key]["total"] += 1
+
+        for issue in unresolved_issues:
+            fields = issue.fields
+            project_key = getattr(fields.project, "key", "UNKNOWN")
+            priority = getattr(fields.priority, "name", "None")
+            status = getattr(fields.status, "name", "Unknown")
+            assignee = getattr(fields.assignee, "displayName", "Unassigned")
+
+            per_project_data[project_key]["unresolved_by_priority"][priority] += 1
+            per_project_data[project_key]["unresolved_by_status"][status] += 1
+            per_project_data[project_key]["unresolved_by_assignee"][assignee] += 1
+
+            global_unresolved_by_priority[priority] += 1
+            global_unresolved_by_status[status] += 1
+            global_unresolved_by_assignee[assignee] += 1
+
+        # Add unresolved ratio and convert counters to dicts
+        for project_key, data in per_project_data.items():
+            total = data["total"]
+            unresolved_total = sum(data["unresolved_by_priority"].values())
+            data["unresolved_ratio"] = round(unresolved_total / total, 2) if total else 0
+            data["unresolved_by_priority"] = dict(data["unresolved_by_priority"])
+            data["unresolved_by_status"] = dict(data["unresolved_by_status"])
+            data["unresolved_by_assignee"] = dict(data["unresolved_by_assignee"])
+
         return {
-            "total": sum(status_counts.values()),
-            "statuses": dict(status_counts)
+            "total_issues": total_issues,
+            "total_unresolved_issues": len(unresolved_issues),
+            "unresolved_global_by_priority": dict(global_unresolved_by_priority),
+            "unresolved_global_by_status": dict(global_unresolved_by_status),
+            "unresolved_global_by_assignee": dict(global_unresolved_by_assignee),
+            "per_project": per_project_data,
+            "generated_at": datetime.utcnow().replace(tzinfo=pytz.UTC).isoformat()
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to summarize JQL: {e}")
+
+
+
 
 
 def _execute_jql_query(jql: str) -> List[Dict]:
@@ -664,60 +714,125 @@ def _approximate_jira_issue_count(jql: str) -> Dict:
         return {"error": str(e), "jql": jql}
     
 
-def _analyze_jira_issues_from_jql(jql: str) -> Dict:
+def _summarize_and_analyze_jql(jql: str) -> Dict:
     """
-    Executes a JQL query and returns statistics about the matching issues.
-    Now includes average resolution time only for issues of type "Incident SLA", grouped by priority.
+    Executes a JQL query and returns a comprehensive summary and analysis:
+    - Total issue count
+    - Unresolved issue count
+    - Global unresolved grouped by priority, status, assignee
+    - Per-project breakdowns:
+        - Project name
+        - Total issues
+        - Unresolved by priority/status/assignee
+        - Unresolved ratio
+        - Average resolution time for Incident SLA by priority
+    - Incident SLA average resolution time by priority (globally and per project)
     """
     try:
+        from collections import Counter, defaultdict
+        from datetime import datetime
+        import pytz
+
+        all_issues = []
+        next_page_token = None
+        max_results = 100
+
         status_counter = Counter()
         assignee_counter = Counter()
         priority_counter = Counter()
-        resolution_times_by_priority = defaultdict(list)
 
-        total_issues = 0
-        next_page_token = None
+        resolution_times_by_priority = defaultdict(list)
+        resolution_times_by_project = defaultdict(lambda: defaultdict(list))
+
+        global_unresolved_by_priority = Counter()
+        global_unresolved_by_status = Counter()
+        global_unresolved_by_assignee = Counter()
+
+        per_project_data = defaultdict(lambda: {
+            "project_name": "",
+            "total": 0,
+            "unresolved_by_priority": Counter(),
+            "unresolved_by_status": Counter(),
+            "unresolved_by_assignee": Counter(),
+            "average_resolution_time_by_priority_for_incident_sla": {}
+        })
 
         while True:
-            response = jira.enhanced_search_issues(
+            issues = jira.enhanced_search_issues(
                 jql_str=jql,
-                fields=["status", "assignee", "priority", "created", "resolutiondate", "issuetype"],
-                use_post=True,
-                json_result=False,
                 nextPageToken=next_page_token,
-                maxResults=100
+                maxResults=max_results,
+                fields=["project", "status", "priority", "assignee", "resolution", "created", "resolutiondate", "issuetype"],
+                use_post=True
             )
 
-            issues = response
-            total_issues += len(issues)
+            if not issues:
+                break
 
-            for issue in issues:
-                fields = issue.fields
-
-                status = getattr(fields.status, "name", "Unknown")
-                assignee = getattr(fields.assignee, "displayName", "Unassigned")
-                priority = getattr(fields.priority, "name", "None")
-                issue_type = getattr(fields.issuetype, "name", "Unknown")
-
-                status_counter[status] += 1
-                assignee_counter[assignee] += 1
-                priority_counter[priority] += 1
-
-                created = fields.created
-                resolved = getattr(fields, "resolutiondate", None)
-
-                if issue_type == "Incident SLA" and created and resolved:
-                    try:
-                        created_dt = datetime.strptime(created[:19], "%Y-%m-%dT%H:%M:%S")
-                        resolved_dt = datetime.strptime(resolved[:19], "%Y-%m-%dT%H:%M:%S")
-                        days_to_resolve = (resolved_dt - created_dt).total_seconds() / 86400
-                        resolution_times_by_priority[priority].append(days_to_resolve)
-                    except Exception:
-                        pass
-
-            next_page_token = getattr(response, "nextPageToken", None)
+            all_issues.extend(issues)
+            next_page_token = getattr(issues, "nextPageToken", None)
             if not next_page_token:
                 break
+
+        total_issues = len(all_issues)
+        unresolved_issues = [i for i in all_issues if not getattr(i.fields, "resolution", None)]
+
+        for issue in all_issues:
+            fields = issue.fields
+            project_key = getattr(fields.project, "key", "UNKNOWN")
+            project_name = getattr(fields.project, "name", "Unknown Project")
+            status = getattr(fields.status, "name", "Unknown")
+            assignee = getattr(fields.assignee, "displayName", "Unassigned")
+            priority = getattr(fields.priority, "name", "None")
+            issue_type = getattr(fields.issuetype, "name", "Unknown")
+            created = fields.created
+            resolved = getattr(fields, "resolutiondate", None)
+
+            per_project_data[project_key]["project_name"] = project_name
+            per_project_data[project_key]["total"] += 1
+
+            status_counter[status] += 1
+            assignee_counter[assignee] += 1
+            priority_counter[priority] += 1
+
+            if issue_type == "Incident SLA" and created and resolved:
+                try:
+                    created_dt = datetime.strptime(created[:19], "%Y-%m-%dT%H:%M:%S")
+                    resolved_dt = datetime.strptime(resolved[:19], "%Y-%m-%dT%H:%M:%S")
+                    days_to_resolve = (resolved_dt - created_dt).total_seconds() / 86400
+                    resolution_times_by_priority[priority].append(days_to_resolve)
+                    resolution_times_by_project[project_key][priority].append(days_to_resolve)
+                except Exception:
+                    pass
+
+        for issue in unresolved_issues:
+            fields = issue.fields
+            project_key = getattr(fields.project, "key", "UNKNOWN")
+            priority = getattr(fields.priority, "name", "None")
+            status = getattr(fields.status, "name", "Unknown")
+            assignee = getattr(fields.assignee, "displayName", "Unassigned")
+
+            per_project_data[project_key]["unresolved_by_priority"][priority] += 1
+            per_project_data[project_key]["unresolved_by_status"][status] += 1
+            per_project_data[project_key]["unresolved_by_assignee"][assignee] += 1
+
+            global_unresolved_by_priority[priority] += 1
+            global_unresolved_by_status[status] += 1
+            global_unresolved_by_assignee[assignee] += 1
+
+        for project_key, data in per_project_data.items():
+            total = data["total"]
+            unresolved_total = sum(data["unresolved_by_priority"].values())
+            data["unresolved_ratio"] = round(unresolved_total / total, 2) if total else 0
+            data["unresolved_by_priority"] = dict(data["unresolved_by_priority"])
+            data["unresolved_by_status"] = dict(data["unresolved_by_status"])
+            data["unresolved_by_assignee"] = dict(data["unresolved_by_assignee"])
+
+            if project_key in resolution_times_by_project:
+                data["average_resolution_time_by_priority_for_incident_sla"] = {
+                    prio: round(sum(times) / len(times), 2)
+                    for prio, times in resolution_times_by_project[project_key].items()
+                }
 
         avg_resolution_by_priority = {
             prio: round(sum(times) / len(times), 2)
@@ -727,11 +842,19 @@ def _analyze_jira_issues_from_jql(jql: str) -> Dict:
         return {
             "jql": jql,
             "total_issues": total_issues,
+            "total_unresolved_issues": len(unresolved_issues),
             "status_counts": dict(status_counter),
             "priority_counts": dict(priority_counter),
             "assignee_counts": dict(assignee_counter),
-            "average_resolution_time_by_priority_for_incident_sla": avg_resolution_by_priority
+            "unresolved_global_by_priority": dict(global_unresolved_by_priority),
+            "unresolved_global_by_status": dict(global_unresolved_by_status),
+            "unresolved_global_by_assignee": dict(global_unresolved_by_assignee),
+            "per_project": {k: dict(v) for k, v in per_project_data.items()},
+            "average_resolution_time_by_priority_for_incident_sla": avg_resolution_by_priority,
+            "generated_at": datetime.utcnow().replace(tzinfo=pytz.UTC).isoformat()
         }
 
     except Exception as e:
-        return {"error": str(e), "jql": jql}
+        raise HTTPException(status_code=500, detail=f"Failed to analyze JQL: {e}")
+
+
