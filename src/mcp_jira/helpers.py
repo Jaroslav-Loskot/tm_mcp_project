@@ -12,8 +12,8 @@ import re
 from jira import JIRA  # Atlassian Python client
 import os
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
 import re
+from datetime import datetime, timezone
 
 import pytz
 from mcp_common.utils.bedrock_wrapper import call_claude, call_nova_lite
@@ -109,7 +109,7 @@ def _parse_jira_date(input_str: str) -> str:
     - Date strings: 2025-07-01, 07/01/2025, 1 Jul 2025, July 1, 2025, etc.
     """
     input_str = input_str.strip().lower()
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     # Handle natural keywords
     if input_str in ["today", "now"]:
