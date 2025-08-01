@@ -4,7 +4,7 @@ import json
 import logging
 import textwrap
 import time
-from typing import Counter, Dict, List, Optional
+from typing import Any, Counter, Dict, List, Optional
 from difflib import get_close_matches
 from fastapi import HTTPException
 from datetime import datetime, timedelta
@@ -214,7 +214,57 @@ def get_all_jira_statuses() -> List[str]:
         raise HTTPException(status_code=500, detail=f"Failed to fetch Jira statuses: {e}")
 
 
-def get_all_jira_priorities() -> list[str]:
+
+def _resolve_types_and_statuses(
+    project_key: Optional[str] = None,
+    project_names: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """
+    Resolves available issue types and statuses across Jira projects.
+
+    Args:
+        full_user_input: The original user message (can be used for future NLP features).
+        project_key: Optional single Jira project key.
+        project_names: Optional list of Jira project names.
+
+    Returns:
+        A dictionary with:
+        {
+            "available_issue_types": [...],
+            "available_statuses": [...]
+        }
+    """
+    # Resolve project keys
+    if project_key:
+        keys = [project_key]
+    elif project_names:
+        all_projects = _list_projects()
+        name_to_key = {p["name"].lower(): p["key"] for p in all_projects}
+        keys = [name_to_key[name.lower()] for name in project_names if name.lower() in name_to_key]
+    else:
+        keys = [p["key"] for p in _list_projects()]
+
+    if not keys:
+        raise ValueError("Could not resolve any project keys.")
+
+    issue_type_set = set()
+    status_set = set()
+
+    for key in keys:
+        for issue_type in jira.issue_types_for_project(key):
+            issue_type_set.add(issue_type.name)
+            for status in getattr(issue_type, "statuses", []):
+                status_set.add(status.name)
+
+    return {
+        "available_issue_types": sorted(issue_type_set),
+        "available_statuses": sorted(status_set)
+    }
+
+
+
+
+def _get_all_jira_priorities() -> list[str]:
     """
     Fetches all available Jira priorities.
     Returns:
@@ -291,7 +341,7 @@ def _generate_jql_from_input(
         raise ValueError("No allowed projects after applying filters.")
 
     allowed_project_keys = [p["key"] for p in allowed_projects]
-    allowed_priorities = get_all_jira_priorities()
+    allowed_priorities = _get_all_jira_priorities()
 
     project_map_str = "\n".join([f"{p['key']}: {p['name']}" for p in allowed_projects])
 
@@ -301,15 +351,14 @@ def _generate_jql_from_input(
         "RULES:\n"
         "- A list of projects is provided in the format '<KEY>: <NAME>'.\n"
         "- The user may refer to a project by either its key or name. You must resolve it to a key.\n"
-        "- Only use the provided project keys and priorities.\n"
-        "- For issue status, DO NOT use raw status names like 'In Progress'.\n"
+        "- Only use the provided project keys and priorities. \n"
+        "- If the user does not provide any project, call the tool for all projects.\n"
+        "- For issue status, avoid using raw status names like 'In Progress' unless specifically asked.\n"
         "- Instead, infer resolution as follows:\n"
-        "   - If the user explicitly asks for **open**, **unresolved**, or **incomplete** issues, use:\n"
-        "       resolution in (Unresolved, EMPTY)\n"
-        "   - If the user explicitly asks for **closed**, **completed**, or **resolved** issues, use:\n"
-        "       resolution not in (Unresolved, EMPTY)\n"
+        "   - Only use 'resolution' with these statuses: (Unresolved, EMPTY). NOTHING ELSE.'\n" 
         "   - If the user refers to **all issues** or only filters by project, priority, or date, DO NOT include a resolution clause.\n"
         "- If a priority is mentioned, include it. Otherwise, omit it.\n"
+        "- If a type or status is specified included it, Otherwise, omit it. If included ALWAYS keep the items within '', like: 'status', or 'type'. "
         "- For date filters:\n"
         "   - Use **updated >=** only if the user explicitly mentions 'recently updated', 'changed', or 'modified'.\n"
         "   - Otherwise, default to **created >=**.\n"
@@ -333,7 +382,11 @@ def _generate_jql_from_input(
     {project_map_str}
 
     Allowed Priorities:
-    {', '.join(allowed_priorities)}"""
+    {', '.join(allowed_priorities)}
+
+    Alloved Task types and statuses:
+    {_resolve_types_and_statuses()}
+    """
 
     response = call_nova_lite(system_prompt + "\n" + user_prompt)
 

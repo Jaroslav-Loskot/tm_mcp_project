@@ -179,7 +179,7 @@ def parse_jira_date(input_str: str) -> str:
     """
     return helpers._parse_jira_date(input_str)
 
-@mcp.tool
+# @mcp.tool
 def generate_jql_from_input(user_input: str) -> dict:
     """
     Generate a valid Jira JQL string from natural language input using AI assistance,

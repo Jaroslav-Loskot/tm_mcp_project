@@ -3,23 +3,26 @@ import os
 import json
 import re
 import warnings
-from jira import JIRA
-from langgraph.prebuilt import ToolNode
-from langchain.chat_models import init_chat_model
 from dotenv import load_dotenv
-from langchain_aws.chat_models.bedrock import ChatBedrock
+from jira import JIRA
 from typing import Annotated, Dict, List
 
 from typing_extensions import TypedDict
 
+from langgraph.prebuilt import ToolNode
+from langchain_aws.chat_models.bedrock import ChatBedrock
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langchain_core.tools import tool
-import mcp_jira.helpers as helpers
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
+import mcp_jira.helpers as helpers
 
-
-warnings.filterwarnings(action="ignore", message=r"datetime.datetime.utcnow")
+# warnings.filterwarnings(action="ignore", message=r"datetime.datetime.utcnow")
+warnings.filterwarnings(
+    action="error",
+    category=DeprecationWarning,
+    message="`config_type` is deprecated" # Optional, but good for being specific
+)
 
 load_dotenv(override=True)
 JIRA_URL = os.getenv("JIRA_BASE_URL")
@@ -30,7 +33,6 @@ DEFAULT_CATEGORY = os.getenv("DEFAULT_PROJECT_CATEGORY", "")
 EXCLUDED_KEYS = [k.strip() for k in os.getenv("EXCLUDED_PROJECT_KEYS", "").split(",") if k.strip()]
 
 jira = JIRA(server=JIRA_URL, basic_auth=(JIRA_USER, JIRA_TOKEN))
-
 
 def pretty_print_messages(state):
     print("💬 Conversation:\n" + "-" * 60)
@@ -73,9 +75,6 @@ def pretty_print_messages(state):
         else:
             print(f"⚠️ Unknown message type: {m}\n")
 
-
-
-
 def init_chat_model(model_key: str = "CLAUDE_MODEL_ID") -> ChatBedrock:
     model_id = os.environ[model_key]
     region = os.environ["AWS_REGION"]
@@ -86,12 +85,11 @@ def init_chat_model(model_key: str = "CLAUDE_MODEL_ID") -> ChatBedrock:
         model_kwargs={"temperature": 0}
     )
 
+class AgentContext(TypedDict):
+    pass
+
 class State(TypedDict):
     messages: Annotated[list, add_messages]
-
-
-graph_builder = StateGraph(State)
-
 
 #### TOOLS ---------------------------------------------------------------------------------------------------------------
 
@@ -108,6 +106,7 @@ def list_issue_type_statuses_tool(project_key: str) -> List[Dict[str, List[str]]
       ]
     """
     try:
+        # Assuming helpers.jira.issue_types_for_project exists and works.
         issue_types = helpers.jira.issue_types_for_project(project_key)
         result = []
         for it in issue_types:
@@ -132,7 +131,6 @@ def parse_jira_date_tool(input_str: str) -> str:
         Date string like "2025-07-01"
     """
     today = datetime.date.today().isoformat()
-
     system_prompt = (
         f"You are a date conversion assistant for Jira JQL queries.\n"
         f"Today is: {today}\n\n"
@@ -161,7 +159,6 @@ def parse_jira_date_tool(input_str: str) -> str:
     else:
         raise ValueError(f"Could not parse a valid date from response: {response}")
 
-
 @tool
 def resolve_project_name_tool(human_input: str) -> List[Dict[str, str]]:
     """
@@ -174,6 +171,7 @@ def resolve_project_name_tool(human_input: str) -> List[Dict[str, str]]:
     Returns:
     - The matching Jira project name (e.g., 'Website Comapny'), or raises error if not found or invalid.
     """
+    # Assuming helpers._resolve_project_name exists and returns a list of dicts.
     return helpers._resolve_project_name(human_input, os.environ["DEFAULT_PROJECT_CATEGORY"])
 
 
@@ -204,20 +202,24 @@ def check_jql(jql: str) -> Dict:
         return {"error": str(e), "jql": jql}
 
 
+# **IMPORTANT FIX**: Add the resolve_project_name_tool to the main tools list
 tools = [parse_jira_date_tool, check_jql, list_issue_type_statuses_tool, resolve_project_name_tool]
+
+
 
 
 def bot_manager(state: State):
     llm = init_chat_model("NOVA_LITE_MODEL_ID")
+    # Bind all tools, including the project resolver
     llm_with_tools = llm.bind_tools(tools)
 
     SYSTEM_PROMPT = """You are a helpful assistant that converts natural language into valid Jira JQL queries.
 
     Core Rules:
     - Always resolve project names from the user input *before* generating JQL. Use the `resolve_project_name_tool` for this.
-    - If the input contains any project names (e.g., 'UniCredit Italy', 'Austria DevOps'), extract them and let the model call the `resolve_project_name_tool`.
+    - If the input contains any project names (e.g., 'UniCredit Italy', 'Austria DevOps'), call the `resolve_project_name_tool` with the project name.
     - Only proceed to generate JQL after all names are resolved.
-    - If the user asks for a project that doesn't exist, provide a helpful message about the projects you can see.
+    - If a project name is not found by the tool, respond to the user that the project could not be found and ask for clarification.
 
     Tool Usage:
     - Always use tools to resolve project names, date expressions, and available issue types/statuses.
@@ -252,10 +254,7 @@ def bot_manager(state: State):
     Return only JSON:
     ```json
     { "jql": "<generated JQL>", "approx_query_results": <number> }
-    ````
-
     """
-
 
     messages = state["messages"]
     if not any(isinstance(m, SystemMessage) for m in messages):
@@ -266,40 +265,28 @@ def bot_manager(state: State):
 
 
 def route_tools(state: State):
-    """
-    Use in the conditional\_edge to route to the ToolNode if the last message
-    has tool calls. Otherwise, route to the end.
-    """
     if isinstance(state, list):
         ai_message = state[-1]
     elif messages := state.get("messages", []):
         ai_message = messages[-1]
     else:
-        raise ValueError(f"No messages found in input state to tool\_edge: {state}")
-
+        raise ValueError(f"No messages found in input state to tool_edge: {state}")
 
     if hasattr(ai_message, "tool_calls") and len(ai_message.tool_calls) > 0:
         return "tools"
     return END
 
-
-
+graph_builder = StateGraph(State, context_schema=AgentContext)
 
 graph_builder.add_node("bot_manager", bot_manager)
 graph_builder.add_node("tools", ToolNode(tools=tools))
 
 graph_builder.set_entry_point("bot_manager")
-
-# bot\_manager can either make a tool call or finish the conversation
-
 graph_builder.add_conditional_edges(
     "bot_manager",
     route_tools,
     {"tools": "tools", END: END}
 )
-
-# Tool node routes back to bot\_manager to continue the conversation
-
 graph_builder.add_edge("tools", "bot_manager")
 graph = graph_builder.compile()
 
@@ -308,10 +295,5 @@ def call_agent_generate_jql(human_input : str):
     state = {"messages": [user_message]}
     return graph.invoke(state)
 
-if __name__ == "__main__":
-    # Example usage:
-    # This will now correctly route to the bot\_manager, which will then use the tools
-    # to resolve the project names, and then potentially other tools to construct the JQL.
-    result = call_agent_generate_jql("UniCredit Italy AND UniCredit Austria all opened issues with the type SLA Incident and Incident non SLA? Only for the last 3 months?")
-    pretty_print_messages(result)
+
 
