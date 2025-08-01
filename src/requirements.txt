@@ -4,3 +4,5 @@ python-dotenv
 jira[cli]
 boto3
 simple-salesforce
+langgraph
+langgraph-supervisor
