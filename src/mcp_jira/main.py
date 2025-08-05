@@ -192,16 +192,14 @@ def generate_jql_from_input(user_input: str) -> dict:
     A dictionary with:
     - jql: the generated JQL string with filters applied
     - approx_query_results: estimated number of matching issues
+    - comment: AI agent comment or explanation, if any
     """
     result = helpers._generate_jql_from_input(user_input=user_input)
-    jql = result.get("jql", "")
-
-    estimate = helpers._approximate_jira_issue_count(jql)
-    count = estimate.get("approximate_count", -1)
 
     return {
-        "jql": jql,
-        "approx_query_results": count
+        "jql": result.get("jql", ""),
+        "approx_query_results": result.get("approx_query_results", -1),
+        "comment": result.get("comment", "")
     }
 
 

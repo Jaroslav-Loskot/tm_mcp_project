@@ -325,7 +325,7 @@ def _generate_jql_from_input(
         exclude_projects: Optional list of project keys to exclude.
 
     Returns:
-        dict with 'jql' and 'approx_query_results'.
+        dict with 'jql', 'approx_query_results', and 'comment'.
     """
     all_projects = _list_projects()
 
@@ -351,14 +351,14 @@ def _generate_jql_from_input(
         "RULES:\n"
         "- A list of projects is provided in the format '<KEY>: <NAME>'.\n"
         "- The user may refer to a project by either its key or name. You must resolve it to a key.\n"
-        "- Only use the provided project keys and priorities. \n"
-        "- If the user does not provide any project, call the tool for all projects.\n"
+        "- Only use the provided project keys and priorities.\n"
+        "- If the user does not provide any project, assume all allowed projects.\n"
         "- For issue status, avoid using raw status names like 'In Progress' unless specifically asked.\n"
         "- Instead, infer resolution as follows:\n"
-        "   - Only use 'resolution' with these statuses: (Unresolved, EMPTY). NOTHING ELSE.'\n" 
+        "   - Only use 'resolution' with these statuses: (Unresolved, EMPTY). NOTHING ELSE.\n"
         "   - If the user refers to **all issues** or only filters by project, priority, or date, DO NOT include a resolution clause.\n"
         "- If a priority is mentioned, include it. Otherwise, omit it.\n"
-        "- If a type or status is specified included it, Otherwise, omit it. If included ALWAYS keep the items within '', like: 'status', or 'type'. "
+        "- If a type or status is specified, include it. Otherwise, omit it. If included, ALWAYS keep the items within '', like: 'status', or 'type'.\n"
         "- For date filters:\n"
         "   - Use **updated >=** only if the user explicitly mentions 'recently updated', 'changed', or 'modified'.\n"
         "   - Otherwise, default to **created >=**.\n"
@@ -366,14 +366,26 @@ def _generate_jql_from_input(
         "       - months: convert to days using 30 days per month\n"
         "       - quarters: convert to days using 90 days per quarter\n"
         "       - years: convert to days using 365 days per year\n"
-        "- Return ONLY this JSON structure: { \"jql\": \"...\" }\n\n"
+        "\n"
+        "RESPONSE FORMAT:\n"
+        "- Respond ONLY with this JSON structure:\n"
+        "{\n"
+        "  \"jql\": \"...\",\n"
+        "  \"comment\": \"...\" // Optional but recommended when assumptions or ambiguity exist\n"
+        "}\n"
+        "- The 'comment' field should explain ANY assumptions, guesses, or ambiguous parts.\n"
+        "- Keep the comment relevant.\n"
+        "\n"
         "Examples:\n"
-        "- 'open issues from last week' → created >= -1w AND resolution in (Unresolved, EMPTY)\n"
-        "- 'closed high priority bugs for UCB' → project = UCB AND priority = High AND resolution not in (Unresolved, EMPTY)\n"
-        "- 'all PostFinance tickets' → project = ASPFI\n"
-        "- 'tickets from past 3 months' → created >= -90d\n"
-        "- 'recently updated issues from last 2 weeks' → updated >= -2w\n"
+        "- Input: 'open issues from last week'\n"
+        "  → { \"jql\": \"created >= -1w AND resolution in (Unresolved, EMPTY)\", \"comment\": \"Assumed 'open' means unresolved.\" }\n"
+        "- Input: 'tickets from past 3 months'\n"
+        "  → { \"jql\": \"created >= -90d\", \"comment\": \"Converted 3 months into 90 days.\" }\n"
+        "- Input: 'recent tickets for PostFinance'\n"
+        "  → { \"jql\": \"project = ASPFI AND created >= -14d\", \"comment\": \"Assumed 'recent' means last 2 weeks.\" }\n"
     )
+
+
 
     user_prompt = f"""User Query:
     {user_input}
@@ -384,32 +396,37 @@ def _generate_jql_from_input(
     Allowed Priorities:
     {', '.join(allowed_priorities)}
 
-    Alloved Task types and statuses:
+    Allowed Task types and statuses:
     {_resolve_types_and_statuses()}
     """
 
-    response = call_nova_lite(system_prompt + "\n" + user_prompt)
+    full_response = call_nova_lite(system_prompt + "\n" + user_prompt)
 
-    match = re.search(r'\{.*\}', response, re.DOTALL)
-    result = json.loads(match.group(0)) if match else json.loads(response)
+    try:
+        # Find the first valid JSON object using a non-greedy match
+        match = re.search(r'\{.*?\}', full_response, re.DOTALL)
+        if not match:
+            raise ValueError("No JSON object found in model response.")
+        
+        result = json.loads(match.group(0))
 
-    generated_jql = result["jql"]
 
-    project_in_clause = f"project IN ({', '.join(f'\'{k}\'' for k in allowed_project_keys)})"
-    project_not_in_clause = f" AND project NOT IN ({', '.join(f'\'{p}\'' for p in exclude_projects)})" if exclude_projects else ""
+    except Exception as e:
+        raise ValueError(f"Failed to parse model response.\nError: {e}\nResponse:\n{full_response}")
 
-    if "project" not in generated_jql.lower():
-        full_jql = f"{project_in_clause}{project_not_in_clause} AND ({generated_jql})"
-    else:
-        full_jql = generated_jql
 
-    approx = _approximate_jira_issue_count(full_jql)
+    generated_jql = result.get("jql", "").strip()
+    comment = result.get("comment", "").strip() or "No comment provided."
+
+    approx = _approximate_jira_issue_count(generated_jql)
     approx_count = approx.get("approximate_count", -1)
 
     return {
-        "jql": full_jql,
-        "approx_query_results": approx_count
+        "jql": generated_jql,
+        "approx_query_results": approx_count,
+        "comment": comment
     }
+
 
 
 def _summarize_jira_issues(jql: str) -> Dict:
