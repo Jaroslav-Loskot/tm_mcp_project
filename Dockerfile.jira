@@ -1,0 +1,21 @@
+FROM python:3.12-slim
+
+# Set working dir to the repo root
+WORKDIR /app
+
+# Copy the entire project into the container
+COPY . /app
+
+# Install dependencies from requirements.txt and the local project
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r src/requirements.txt && \
+    pip install .
+
+# Set PYTHONPATH
+ENV PYTHONPATH=/app/src
+
+# Expose the port the app runs on
+EXPOSE 8100
+
+# Run the Jira module
+CMD ["python", "-m", "mcp_jira.main"]

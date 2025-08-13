@@ -3,9 +3,22 @@ services:
     container_name: mcp-jira
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.jira
     ports:
       - "8100:8100"
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - n8n_default
+
+  mcp-salesforce:
+    container_name: mcp-salesforce
+    build:
+      context: .
+      dockerfile: Dockerfile.salesforce
+    ports:
+      - "8200:8200"
     env_file:
       - .env
     restart: unless-stopped
