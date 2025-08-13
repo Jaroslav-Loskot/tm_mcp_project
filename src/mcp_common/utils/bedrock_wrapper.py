@@ -9,7 +9,7 @@ from fastapi import HTTPException
 
 from dotenv import load_dotenv
 from pathlib import Path
-
+from langchain_aws.chat_models.bedrock import ChatBedrock
 
 
 load_dotenv(Path(__file__).resolve().parents[3] / ".env")
@@ -86,6 +86,11 @@ def call_nova_lite(user_prompt: str) -> str:
 
 
 
+def init_chat_model(model_key: str = "NOVA_LITE_MODEL_ID") -> ChatBedrock:
+    """Initialize the Bedrock chat model."""
+    model_id = os.environ[model_key]
+    region = os.environ["AWS_REGION"]
+    return ChatBedrock(model_id=model_id, region_name=region, model_kwargs={"temperature": 0})
 
 
 # --- Claude Generation via signed HTTP request ---
@@ -158,3 +163,9 @@ def fetch_embedding(text: str) -> list[float]:
         raise HTTPException(
             status_code=500, detail=f"Embedding generation failed: {str(e)}"
         )
+
+
+
+
+if __name__ == "__main__":
+    pass
