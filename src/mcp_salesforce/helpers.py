@@ -7,7 +7,8 @@ from typing import Any, Dict, List, Optional, Iterable, Tuple, Union
 import mcp_salesforce.core_schema as core_schema
 import mcp_common.utils.bedrock_wrapper as bedrock_wrapper
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
-
+from thefuzz import fuzz
+import mcp_salesforce.helpers as helpers
 
 load_dotenv()
 
@@ -237,201 +238,153 @@ def _friendly_to_select_expr(object_api: str, friendly_attr: str) -> Optional[st
     # Otherwise skip (keep simple + predictable)
     return None
 
-def llm_pick_best_name_matches_tool(
+
+
+
+def find_best_name_matches(
     query: str,
     k: int = 5,
-    max_per_type: int = 400,
-    shortlist_cap: int = 80,
-    force: bool = True,
+    max_records: int = 2000
 ) -> List[Dict[str, Any]]:
     """
-    Let the LLM pick top-K best matches across Account + Opportunity.
-    Always returns both IDs (non-applicable one is None).
+    Finds and ranks the best matching Account and Opportunity records based on a search query. 
+    This tool is highly effective for queries that contain spelling mistakes or are only partial names.
+    It returns a list of top matches, ordered by a robust fuzzy match score.
 
-    Output rows:
-    {
-      "account_id": "001... or None",
-      "opportunity_id": "006... or None",
-      "name": "<Name>",
-      "type": "Account" | "Opportunity",
-      "match_score": 0..100
-    }
+    Args:
+        query: The search term or name to match against Account and Opportunity records.
+        k: The number of top-ranked matches to return. Defaults to 5.
+        max_records: The maximum number of records to fetch from Salesforce for each object type (Account and Opportunity). Defaults to 2000.
+
+    Returns:
+        A list of dictionaries, where each dictionary represents a matched record and includes:
+        - "account_id": The Salesforce ID of the Account (or None if the record is an Opportunity).
+        - "opportunity_id": The Salesforce ID of the Opportunity (or None if the record is an Account).
+        - "name": The name of the record.
+        - "type": "Account" or "Opportunity".
+        - "match_score": A calculated score (0-100) indicating how well the name matches the query.
     """
-    sf = get_sf_connection()
-    term = _sosl_escape(query)
-    candidates: List[Dict[str, Any]] = []
 
-    # SOSL (prefix then fuzzy) over both
-    returning = [
-        f"Account(Id, Name ORDER BY Name LIMIT {int(max_per_type)})",
-        f"Opportunity(Id, Name, AccountId ORDER BY Name LIMIT {int(max_per_type)})",
-    ]
-
-    def _add_sosl(records):
-        for r in records or []:
-            t = r.get("attributes", {}).get("type")
-            if t == "Account":
-                n = r.get("Name") or ""
-                if n:
-                    candidates.append({"account_id": r.get("Id"), "opportunity_id": None, "name": n, "type": "Account"})
-            elif t == "Opportunity":
-                n = r.get("Name") or ""
-                if n:
-                    candidates.append({"account_id": r.get("AccountId"), "opportunity_id": r.get("Id"), "name": n, "type": "Opportunity"})
-
-    if term:
-        try:
-            sosl = f"FIND {{{term}*}} IN NAME FIELDS RETURNING {', '.join(returning)}"
-            _add_sosl(sf.search(sosl))
-        except Exception:
-            pass
-        if not candidates:
-            try:
-                sosl_fuzzy = f"FIND {{{term}~}} IN NAME FIELDS RETURNING {', '.join(returning)}"
-                _add_sosl(sf.search(sosl_fuzzy))
-            except Exception:
-                pass
-
-    # SOQL LIKE fallback
-    if not candidates and term:
-        like = "%" + term.replace("'", "\\'") + "%"
-        try:
-            recs = sf.query(
-                f"SELECT Id, Name FROM Account WHERE Name LIKE '{like}' ORDER BY Name LIMIT {int(max_per_type)}"
-            ).get("records", [])
-            for r in recs:
-                n = r.get("Name")
-                if n:
-                    candidates.append({"account_id": r.get("Id"), "opportunity_id": None, "name": n, "type": "Account"})
-        except Exception:
-            pass
-        try:
-            recs = sf.query(
-                f"SELECT Id, Name, AccountId FROM Opportunity WHERE Name LIKE '{like}' ORDER BY Name LIMIT {int(max_per_type)}"
-            ).get("records", [])
-            for r in recs:
-                n = r.get("Name")
-                if n:
-                    candidates.append({"account_id": r.get("AccountId"), "opportunity_id": r.get("Id"), "name": n, "type": "Opportunity"})
-        except Exception:
-            pass
-
-    # Force: sample recents
-    if not candidates and force:
-        try:
-            recs = sf.query(
-                f"SELECT Id, Name FROM Account WHERE Name != NULL ORDER BY LastModifiedDate DESC LIMIT {int(max_per_type)}"
-            ).get("records", [])
-            for r in recs:
-                n = r.get("Name")
-                if n:
-                    candidates.append({"account_id": r.get("Id"), "opportunity_id": None, "name": n, "type": "Account"})
-        except Exception:
-            pass
-        try:
-            recs = sf.query(
-                f"SELECT Id, Name, AccountId FROM Opportunity WHERE Name != NULL ORDER BY LastModifiedDate DESC LIMIT {int(max_per_type)}"
-            ).get("records", [])
-            for r in recs:
-                n = r.get("Name")
-                if n:
-                    candidates.append({"account_id": r.get("AccountId"), "opportunity_id": r.get("Id"), "name": n, "type": "Opportunity"})
-        except Exception:
-            pass
-
-    if not candidates:
+    try:
+        sf = helpers.get_sf_connection()
+    except Exception as e:
+        print(f"Error connecting to Salesforce: {e}")
         return []
 
-    # De-dup + pre-score + shortlist
+    candidates: List[Dict[str, Any]] = []
+
+    try:
+        # Fetch up to max_records from Accounts, ordered by most recent update
+        account_query = f"SELECT Id, Name FROM Account ORDER BY LastModifiedDate DESC LIMIT {max_records}"
+        accounts = sf.query_all(account_query)
+        for record in accounts.get('records', []):
+            if record.get('Name'):
+                candidates.append({
+                    "account_id": record['Id'],
+                    "opportunity_id": None,
+                    "name": record['Name'],
+                    "type": "Account"
+                })
+
+        # Fetch up to max_records from Opportunities, ordered by most recent update
+        opportunity_query = f"SELECT Id, Name, AccountId FROM Opportunity ORDER BY LastModifiedDate DESC LIMIT {max_records}"
+        opportunities = sf.query_all(opportunity_query)
+        for record in opportunities.get('records', []):
+            if record.get('Name'):
+                candidates.append({
+                    "account_id": record.get('AccountId'),
+                    "opportunity_id": record['Id'],
+                    "name": record['Name'],
+                    "type": "Opportunity"
+                })
+    except Exception as e:
+        print(f"An error occurred during Salesforce data retrieval: {e}")
+        return []
+
+    if not query or not candidates:
+        return []
+
+    # De-duplicate records
     seen = set()
-    uniq: List[Dict[str, Any]] = []
-    for c in candidates:
-        key = (c.get("account_id"), c.get("opportunity_id"), c["type"])
+    uniq_records = []
+    for record in candidates:
+        key = (record.get("account_id"), record.get("opportunity_id"), record["type"])
         if key in seen:
             continue
         seen.add(key)
-        c["pre_score"] = _pre_score(query, c["name"])
-        uniq.append(c)
+        uniq_records.append(record)
 
-    uniq.sort(key=lambda x: (-x["pre_score"], x["type"], x["name"]))
-    shortlist = uniq[: max(1, shortlist_cap)]
-
-    # LLM rank
-    out: List[Dict[str, Any]] = []
-    try:
-        llm = bedrock_wrapper.init_chat_model("NOVA_LITE_MODEL_ID")
-        system = (
-            "Rank candidate names by similarity to the user query. "
-            "Return ONLY a JSON array with objects: {account_id, opportunity_id, name, type, match_score}. "
-            "match_score is 0-100. Sort by match_score desc. No extra text."
-        )
-        payload = {
-            "query": query,
-            "k": k,
-            "candidates": [
-                {
-                    "account_id": c["account_id"],
-                    "opportunity_id": c["opportunity_id"],
-                    "name": c["name"],
-                    "type": c["type"],
-                    "pre_score": c["pre_score"],
-                }
-                for c in shortlist
-            ],
-        }
-        resp = llm.invoke([SystemMessage(content=system), HumanMessage(content=json.dumps(payload, ensure_ascii=False))]).content
-        ranked = _extract_json_array(resp)
-
-        seen2 = set()
-        for r in ranked:
-            aid, oid, name, typ = r.get("account_id"), r.get("opportunity_id"), r.get("name"), r.get("type")
-            if not (name and typ):
-                continue
-            key = (aid, oid, typ)
-            if key in seen2:
-                continue
-            seen2.add(key)
-            try:
-                ms = float(r.get("match_score", 0))
-            except Exception:
-                ms = 0.0
-            out.append(
-                {
-                    "account_id": aid or None,
-                    "opportunity_id": oid or None,
-                    "name": name,
-                    "type": typ,
-                    "match_score": max(0.0, min(100.0, round(ms, 1))),
-                }
-            )
-            if len(out) >= max(1, k):
-                break
-    except Exception:
-        out = []
-
-    # Local fallback
-    if not out:
-        out = [
-            {
-                "account_id": c["account_id"],
-                "opportunity_id": c["opportunity_id"],
-                "name": c["name"],
-                "type": c["type"],
-                "match_score": float(c["pre_score"]),
-            }
-            for c in shortlist[: max(1, k)]
-        ]
-
-    # normalize None
-    for r in out:
-        r["account_id"] = r.get("account_id") or None
-        r["opportunity_id"] = r.get("opportunity_id") or None
-
+    # Fuzzy pre-score each record using a combined approach
+    for record in uniq_records:
+        name = record["name"]
+        
+        # Calculate multiple fuzzy scores for robustness
+        set_score = fuzz.token_set_ratio(query, name)
+        partial_score = fuzz.partial_ratio(query, name)
+        typo_score = fuzz.WRatio(query, name)
+        
+        # Combine the scores with weights
+        record["pre_score"] = (typo_score * 0.45 + set_score * 0.45 + partial_score * 0.1)
+    
+    # Sort all candidates by fuzzy pre-score
+    uniq_records.sort(key=lambda x: (-x["pre_score"], x["name"]))
+    
+    # Format and return the top-K matches
+    out = []
+    for match in uniq_records[:k]:
+        out.append({
+            "account_id": match.get("account_id") or None,
+            "opportunity_id": match.get("opportunity_id") or None,
+            "name": match["name"],
+            "type": match["type"],
+            "match_score": round(match["pre_score"], 1)
+        })
+    
     return out
 
 
-from typing import Dict, Any, List, Optional
-from langchain_core.tools import tool
+def get_all_records_and_print():
+    """
+    Connects to Salesforce, fetches all Account and Opportunity names,
+    and prints them to the console.
+    """
+    try:
+        # Establish a connection to Salesforce
+        sf = get_sf_connection()
+
+        print("Successfully connected to Salesforce.\n")
+
+        # Query for all Account names
+        account_query = "SELECT Name FROM Account"
+        accounts = sf.query_all(account_query)
+
+        # Print all Account names
+        print("--- Accounts ---")
+        if accounts and accounts['totalSize'] > 0:
+            for record in accounts['records']:
+                print(record['Name'])
+        else:
+            print("No accounts found.")
+
+        print("\n" + "="*30 + "\n")
+
+        # Query for all Opportunity names
+        opportunity_query = "SELECT Name FROM Opportunity"
+        opportunities = sf.query_all(opportunity_query)
+
+        # Print all Opportunity names
+        print("--- Opportunities ---")
+        if opportunities and opportunities['totalSize'] > 0:
+            for record in opportunities['records']:
+                print(record['Name'])
+        else:
+            print("No opportunities found.")
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+
+
 
 
 

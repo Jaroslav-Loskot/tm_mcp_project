@@ -6,3 +6,4 @@ langchain-aws
 langgraph
 python-dotenv
 simple-salesforce
+thefuzz

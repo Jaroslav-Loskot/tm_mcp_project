@@ -150,28 +150,30 @@ def fetch_salesforce_entity_details(id_or_name: str) -> dict:
 
 
 @mcp.tool
-def llm_pick_best_name_matches_tool(
+def find_best_name_matches(
     query: str,
     k: int = 5,
-    max_per_type: int = 400,
-    shortlist_cap: int = 80,
-    force: bool = True,
+    max_records: int = 2000
 ) -> List[Dict[str, Any]]:
     """
-    Let the LLM pick top-K best matches across Account + Opportunity.
-    Always returns both IDs (non-applicable one is None).
+    Finds and ranks the best matching Account and Opportunity records based on a search query. 
+    This tool is highly effective for queries that contain spelling mistakes or are only partial names.
+    It returns a list of top matches, ordered by a robust fuzzy match score.
 
-    Output rows:
-    {
-      "account_id": "001... or None",
-      "opportunity_id": "006... or None",
-      "name": "<Name>",
-      "type": "Account" | "Opportunity",
-      "match_score": 0..100
-    }
+    Args:
+        query: The search term or name to match against Account and Opportunity records.
+        k: The number of top-ranked matches to return. Defaults to 5.
+        max_records: The maximum number of records to fetch from Salesforce for each object type (Account and Opportunity). Defaults to 2000.
+
+    Returns:
+        A list of dictionaries, where each dictionary represents a matched record and includes:
+        - "account_id": The Salesforce ID of the Account (or None if the record is an Opportunity).
+        - "opportunity_id": The Salesforce ID of the Opportunity (or None if the record is an Account).
+        - "name": The name of the record.
+        - "type": "Account" or "Opportunity".
+        - "match_score": A calculated score (0-100) indicating how well the name matches the query.
     """
-
-    return helpers.llm_pick_best_name_matches_tool(query, k, max_per_type, shortlist_cap, force)
+    return helpers.find_best_name_matches(query, k, max_records)
 
 
 
