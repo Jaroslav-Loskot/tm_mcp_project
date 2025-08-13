@@ -1,0 +1,17 @@
+services:
+  mcp-jira:
+    container_name: mcp-jira
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8100:8100"
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - n8n_default
+
+networks:
+  n8n_default:
+    external: true

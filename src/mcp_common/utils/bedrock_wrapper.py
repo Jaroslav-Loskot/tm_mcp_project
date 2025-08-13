@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+from typing import Dict, List
 
 import boto3
 from dotenv import load_dotenv
@@ -8,7 +9,7 @@ from fastapi import HTTPException
 
 from dotenv import load_dotenv
 from pathlib import Path
-
+from langchain_aws.chat_models.bedrock import ChatBedrock
 
 
 load_dotenv(Path(__file__).resolve().parents[3] / ".env")
@@ -36,11 +37,61 @@ def call_claude(system_prompt: str, user_input: str) -> str:
 
 
 
-def call_nova_lite(system_prompt: str, user_input: str) -> str:
-    result = call_llm(NOVA_LITE_MODEL_ID, system_prompt, user_input)
-    if result is None:
-        raise ValueError("Claude LLM returned None")
-    return result
+def call_nova_lite(user_prompt: str) -> str:
+    try:
+        body = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "text": user_prompt
+                        }
+                    ]
+                }
+            ]
+        }
+
+        response = bedrock_client.invoke_model(
+            modelId=NOVA_LITE_MODEL_ID,
+            body=json.dumps(body),
+            accept="application/json",
+            contentType="application/json"
+        )
+
+        raw = response["body"].read()
+        response_body = json.loads(raw)
+
+        # Extract assistant message
+        message = response_body.get("output", {}).get("message", {})
+        content_blocks = message.get("content", [])
+
+        for block in content_blocks:
+            text = block.get("text", "")
+            if text:
+                # Strip triple backticks and optional 'json' language tag
+                cleaned = (
+                    text.strip()
+                    .removeprefix("```json")
+                    .removeprefix("```")
+                    .removesuffix("```")
+                    .strip()
+                )
+                return cleaned
+
+        raise ValueError("No assistant text found in Nova response.")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Nova Lite request failed: {str(e)}")
+
+
+
+def init_chat_model(model_key: str = "NOVA_LITE_MODEL_ID") -> ChatBedrock:
+    """Initialize the Bedrock chat model."""
+    model_id = os.environ[model_key]
+    region = os.environ["AWS_REGION"]
+    return ChatBedrock(model_id=model_id, region_name=region, model_kwargs={"temperature": 0})
+
 
 # --- Claude Generation via signed HTTP request ---
 def call_llm(modelId: str, system_prompt: str, user_input: str) -> str:
@@ -112,3 +163,9 @@ def fetch_embedding(text: str) -> list[float]:
         raise HTTPException(
             status_code=500, detail=f"Embedding generation failed: {str(e)}"
         )
+
+
+
+
+if __name__ == "__main__":
+    pass

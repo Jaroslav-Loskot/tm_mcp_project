@@ -1,12 +1,14 @@
 [project]
-name = "mcp_common"
+name = "mcp_salesforce"
 version = "0.1.0"
-description = "Shared MCP utilities"
+description = "MCP Salesforce service"
 authors = [{ name = "Jaroslav" }]
 dependencies = [
     "fastapi",
-    "boto3",
-    "python-dotenv"
+    "fastmcp",
+    "python-dotenv",
+    "simple-salesforce",
+    "mcp_common @ file:///src/mcp_common"
 ]
 requires-python = ">=3.10"
 

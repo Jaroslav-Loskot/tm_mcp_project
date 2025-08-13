@@ -1,16 +1,23 @@
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
+
+import mcp_jira.helpers as helpers
+
+
 import json
 import os
 import re
 import textwrap
-from typing import Dict, List, Optional
-from fastapi import HTTPException
+from typing import Counter, Dict, List, Optional
+from fastapi import HTTPException, APIRouter 
 from fastmcp import FastMCP
 from jira import JIRA
 from dotenv import load_dotenv
 
-from mcp_common.utils.bedrock_wrapper import call_claude
-from mcp_jira.helpers import _generate_jql_from_input, _parse_jira_date, extract_issue_fields
 
+from mcp_common.utils.bedrock_wrapper import call_claude
 
 load_dotenv(override=True)
 
@@ -18,11 +25,15 @@ JIRA_URL = os.getenv("JIRA_BASE_URL")
 JIRA_USER = os.getenv("JIRA_EMAIL")
 JIRA_TOKEN = os.getenv("JIRA_API_TOKEN")
 
-
+DEFAULT_CATEGORY = os.getenv("DEFAULT_PROJECT_CATEGORY", "")
+EXCLUDED_KEYS = [k.strip() for k in os.getenv("EXCLUDED_PROJECT_KEYS", "").split(",") if k.strip()]
 
 jira = JIRA(server=JIRA_URL, basic_auth=(JIRA_USER, JIRA_TOKEN))
 
-mcp = FastMCP("Jira MCP Server", auth=None, stateless_http=True)
+
+
+mcp = FastMCP("Jira MCP Server", auth=None)
+
 
 @mcp.tool()
 def search_issues(jql: str, max_results: int = 5) -> list[dict]:
@@ -65,15 +76,10 @@ def get_available_issue_statuses(key: str) -> list[str]:
 @mcp.tool()
 def list_projects() -> list[dict]:
     """
-    List all Jira projects visible to the current user.
-    Each project includes its key and name (e.g., key='DEV', name='Development').
-    Useful for discovering what project keys to use in JQL queries.
+    List Jira projects visible to the current user.
+
     """
-    try:
-        projects = jira.projects()
-        return [{"key": p.key, "name": p.name} for p in projects]
-    except Exception as e:
-        return [{"error": str(e)}]
+    return helpers._list_projects()
 
 
 @mcp.tool
@@ -91,92 +97,68 @@ def get_all_issue_types() -> List[str]:
     return sorted(issue_type_set)
 
 
-@mcp.tool()
-def get_issue_with_comments(key: str) -> dict:
-    """
-    Retrieve full Jira issue info with cleaned comments, priority, and task type.
-    """
-    try:
-        issue = jira.issue(key)
-        return extract_issue_fields(issue, include_comments=True, jira_client=jira)
-    except Exception as e:
-        return {"error": str(e)}
-
-
 
 
 @mcp.tool()
-def search_advanced_issues(
-    projects: list[str] = [],
-    statuses: list[str] = [],
-    priorities: list[str] = [],
-    assignees: list[str] = [],
-    created_after: str = "",
-    updated_after: str = "",
-    max_results: int = 10,
-    sort_by: str = "created",
-    sort_order: str = "DESC"
-) -> list[dict]:
+def resolve_project_name(human_input: str) -> List[Dict[str, str]]:
     """
-    Search Jira issues using multiple filters:
-    - Accepts lists for projects, statuses, priorities, assignees
-    - Accepts created/updated date ranges in 'YYYY-MM-DD'
-    - Supports sorting by any Jira field
-
-    Returns a list of matching issues with key, summary, status, assignee, priority, created, updated.
-    """
-    jql_parts = []
-
-    if projects:
-        quoted = [f'"{p}"' for p in projects]
-        jql_parts.append(f'project IN ({", ".join(quoted)})')
-    if statuses:
-        quoted = [f'"{s}"' for s in statuses]
-        jql_parts.append(f'status IN ({", ".join(quoted)})')
-    if priorities:
-        quoted = [f'"{p}"' for p in priorities]
-        jql_parts.append(f'priority IN ({", ".join(quoted)})')
-    if assignees:
-        quoted = [f'"{a}"' for a in assignees]
-        jql_parts.append(f'assignee IN ({", ".join(quoted)})')
-    if created_after:
-        jql_parts.append(f'created >= "{created_after}"')
-    if updated_after:
-        jql_parts.append(f'updated >= "{updated_after}"')
-
-    # Validate sort order
-    order = sort_order.upper()
-    if order not in ["ASC", "DESC"]:
-        order = "DESC"
-
-    jql = " AND ".join(jql_parts) if jql_parts else ""
-    jql += f' ORDER BY {sort_by} {order}'
-
-    try:
-        issues = jira.search_issues(jql, maxResults=max_results)
-        return [
-            {
-                extract_issue_fields(issue)
-            }
-            for issue in issues
-        ]
-    except Exception as e:
-        return [{"error": str(e), "jql": jql}]
-
-
-@mcp.tool()
-def resolve_project_key(human_input: str) -> List[str]:
-    """
-    Resolve a Jira project key from human-friendly input.
+    Resolve a Jira project name from human-friendly input.
     Fetches available Jira projects and chooses the best match.
 
     Parameters:
     - human_input: Human-friendly name of the project (e.g., 'website revamp').
 
     Returns:
-    - The matching Jira project key (e.g., 'WEBS'), or raises error if not found or invalid.
+    - The matching Jira project name (e.g., 'Website Comapny'), or raises error if not found or invalid.
     """
-    return resolve_project_key(human_input)
+    
+    return helpers._resolve_project_name(human_input, DEFAULT_CATEGORY)
+
+
+
+@mcp.tool()
+def get_all_statuses_for_project(project_key: str) -> list[str]:
+    """
+    Get all available issue statuses in a Jira project.
+
+    This function fetches all issue types configured for the project, then inspects their metadata
+    to extract all allowed status values (e.g., To Do, In Progress, Done).
+
+    Parameters:
+    - project_key: The key of the Jira project (e.g., "APP", "SEC").
+
+    Returns:
+    - A sorted list of unique status display names used in the project's workflows.
+      If an error occurs, returns a list with a single error message.
+    """
+    try:
+        project = jira.project(project_key)
+        issue_types = project.issueTypes
+        statuses = set()
+
+        for issue_type in issue_types:
+            try:
+                meta = jira.createmeta(
+                    projectKeys=project_key,
+                    issuetypeNames=issue_type.name,
+                    expand="projects.issuetypes.fields"
+                )
+                for project_meta in meta.get('projects', []):
+                    for itype in project_meta.get('issuetypes', []):
+                        if itype.get('name') == issue_type.name:
+                            fields = itype.get('fields', {})
+                            status_field = fields.get('status')
+                            if status_field and 'allowedValues' in status_field:
+                                for s in status_field['allowedValues']:
+                                    statuses.add(s['name'])
+            except Exception:
+                continue  # Continue with next issue type if this one fails
+
+        return sorted(statuses)
+
+    except Exception as e:
+        return [f"Error: {str(e)}"]
+
 
 
 @mcp.tool()
@@ -195,24 +177,39 @@ def parse_jira_date(input_str: str) -> str:
     Returns:
     - A formatted date string in YYYY-MM-DD format.
     """
-    return _parse_jira_date(input_str)
+    return helpers._parse_jira_date(input_str)
 
 @mcp.tool
 def generate_jql_from_input(user_input: str) -> dict:
     """
-    Generates a JSON object containing:
-    - a valid JQL query using only project, priority, and resolution status (resolved/unresolved/all)
-    - an optional max_results value if the user requests a limit
+    Generate a valid Jira JQL string from natural language input using AI assistance,
+    and estimate how many issues match that JQL.
+
+    Parameters:
+    - user_input: Free-form text like "all high priority tickets from last month"
+
+    Returns:
+    A dictionary with:
+    - jql: the generated JQL string with filters applied
+    - approx_query_results: estimated number of matching issues
+    - comment: AI agent comment or explanation, if any
     """
-    return _generate_jql_from_input(user_input)
+    result = helpers._generate_jql_from_input(user_input=user_input)
+
+    return {
+        "jql": result.get("jql", ""),
+        "approx_query_results": result.get("approx_query_results", -1),
+        "comment": result.get("comment", "")
+    }
+
 
 
 @mcp.tool
 def execute_jql_query(jql: str) -> List[Dict]:
     """
-    Executes a JQL query and returns up to 100 matching issues (paginated internally).
-    
-    Fields returned per issue:
+    Executes a JQL query and returns all matching issues using Jira Cloud's enhanced search via automatic pagination.
+
+    Returns the following fields:
     - key
     - summary
     - issue_type
@@ -223,161 +220,198 @@ def execute_jql_query(jql: str) -> List[Dict]:
     - project
     - resolution
     - priority
-
-    Parameters:
-    - jql: The Jira Query Language string.
-
-    Returns:
-    - List of up to 100 issues in compact format.
     """
     try:
-        start_at = 0
-        page_size = 50  # can be tuned if needed
-        total_collected = 0
-        max_limit = 100
-        results = []
-
-        while total_collected < max_limit:
-            remaining = max_limit - total_collected
-            page = jira.search_issues(
-                jql,
-                startAt=start_at,
-                maxResults=min(page_size, remaining),
-                expand="names"
-            )
-
-            for issue in page:
-                fields = issue.fields
-                results.append({
-                    "key": issue.key,
-                    "summary": fields.summary,
-                    "issue_type": getattr(fields.issuetype, "name", None),
-                    "status": getattr(fields.status, "name", None),
-                    "assignee": getattr(fields.assignee, "displayName", None) if fields.assignee else None,
-                    "created": fields.created,
-                    "updated": fields.updated,
-                    "project": getattr(fields.project, "key", None),
-                    "resolution": getattr(fields.resolution, "name", None) if fields.resolution else None,
-                    "priority": getattr(fields.priority, "name", None) if fields.priority else None,
-                })
-                total_collected += 1
-
-                if total_collected >= max_limit:
-                    break
-
-            if len(page) < page_size:
-                break  # no more pages
-
-            start_at += page_size
-
-        return results
+        return helpers._execute_jql_query(jql)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to execute JQL: {e}")
 
 
+
+
+
 @mcp.tool
-def summarize_jira_tickets(ticket_keys: List[str]) -> Dict:
+def summarize_and_analyze_jira_issues(jql: str) -> Dict:
     """
-    Fetches key details and comments for each Jira ticket, then summarizes them using LLM.
+    Summarize Jira issues matching a JQL query, grouped per project.
+
+    Parameters:
+    - jql: A Jira Query Language string (e.g., 'project = ASEAT AND resolution = Unresolved')
 
     Returns:
-    - executive_summary: high-level overview of all tickets
-    - ticket_summaries: mapping of ticket key to its summary
+    A dictionary where each key is a Jira project key, and value includes:
+    - project_name: name of the project
+    - total_issues: total tickets in that project
+    - unresolved_issues: number of unresolved tickets
+    - by_priority: all issues grouped by priority
+    - by_status: all issues grouped by status
+    - by_assignee: all issues grouped by assignee
+    - incident_sla_count_by_priority: number of Incident SLA tickets by priority
+    - incident_sla_avg_resolution_by_priority: average resolution time in days for Incident SLA by priority
+    """
+    return helpers._summarize_and_analyze_jql(jql)
+
+
+# @mcp.tool()
+# def advanced_search_issues(
+#     projects: list[str] = [],
+#     priorities: list[str] = [],
+#     resolved: Optional[bool] = None,
+#     created_after: str = "",
+#     updated_after: str = "",
+#     sort_by: str = "created",
+#     sort_order: str = "DESC"
+# ) -> list[dict]:
+#     """
+#     Search Jira issues using simplified filters.
+
+#     This tool queries Jira using enhanced search and returns issues
+#     filtered by project, priority, resolution state, and date ranges.
+
+#     Parameters:
+#     - projects: List of Jira project keys
+#     - priorities: List of priorities to include
+#     - resolved: True = resolved, False = unresolved, None = all
+#     - created_after: Filter by created >= this date (YYYY-MM-DD)
+#     - updated_after: Filter by updated >= this date (YYYY-MM-DD)
+#     - sort_by: Jira field to sort by
+#     - sort_order: ASC or DESC (default DESC)
+
+#     Returns:
+#     - A list of issue dicts with basic fields
+#     """
+#     try:
+#         return _advanced_search_issues(
+#             projects=projects,
+#             priorities=priorities,
+#             resolved=resolved,
+#             created_after=created_after,
+#             updated_after=updated_after,
+#             sort_by=sort_by,
+#             sort_order=sort_order
+#         )
+#     except Exception as e:
+#         return [{"error": str(e)}]
+
+
+
+@mcp.tool()
+def get_tickets_insights(ticket_keys: List[str]) -> Dict:
+    """
+    Generates intelligent insights and structured summaries for a list of Jira tickets.
+
+    For each ticket, the summary includes:
+    - A structured header with key metadata (Summary, Status, Priority, Assignee, Created, Updated)
+    - A short summary of the ticket's purpose or issue
+    - The most recent update (based on comments)
+    - A suggested next step
+
+    Parameters:
+    - ticket_keys: List of Jira ticket keys (e.g., ["PROJ-123", "PROJ-456"])
+
+    Returns:
+    A dictionary where each key is the ticket key and the value is the generated summary string.
+    If a ticket fails to summarize, an error message is returned instead.
+    """
+    return helpers._get_tickets_insights(ticket_keys)
+
+
+
+
+@mcp.tool()
+def approximate_jira_issue_count(jql: str) -> Dict:
+    """
+    Executes a JQL query and returns an approximate count of matching Jira issues.
+
+    Parameters:
+    - jql: A valid Jira Query Language string (e.g., 'project = PROJ AND status = "To Do"')
+
+    Returns:
+    - A dictionary with:
+      {
+        "jql": "<original input>",
+        "approximate_count": <int>
+      }
+
+    Or if there's an error:
+      {
+        "error": "...",
+        "jql": "<original input>"
+      }
+    """
+    return helpers._approximate_jira_issue_count(jql)
+
+
+# @mcp.tool
+# def analyze_jira_issues(jql: str) -> Dict:
+#     """
+#     Analyze Jira issues matching a JQL query and return aggregated statistics.
+
+#     Parameters:
+#     - jql: Jira Query Language string (e.g., 'project = ASEAT AND resolution IS NOT EMPTY')
+
+#     Returns:
+#     A dictionary with the following fields:
+#     - jql: the input JQL string
+#     - total_issues: total number of matching issues
+#     - status_counts: number of issues grouped by status
+#     - priority_counts: number of issues grouped by priority
+#     - assignee_counts: number of issues grouped by assignee
+#     - average_resolution_time_by_priority_for_incident_sla: average resolution time in **days**
+#       grouped by priority, but only for issues of type "Incident SLA"
+
+#     Example:
+#     {
+#         "jql": "...",
+#         "total_issues": 134,
+#         "status_counts": {"To Do": 42, "In Progress": 54, ...},
+#         "priority_counts": {"High": 70, "Medium": 50, ...},
+#         "assignee_counts": {"John Doe": 30, "Unassigned": 20, ...},
+#         "average_resolution_time_by_priority_for_incident_sla": {"High": 2.8, "Medium": 5.1}
+#     }
+
+#     Notes:
+#     - Resolution time is calculated as the time between `created` and `resolutiondate`
+#     - Only resolved issues contribute to average resolution time
+#     - The resolution time by priority is limited to issues of type "Incident SLA"
+#     """
+#     return _analyze_jira_issues_from_jql(jql)
+
+
+
+@mcp.tool
+def get_issue_keys(jql: str) -> List[str]:
+    """
+    Get a list of issue keys matching a given JQL query.
+
+    Parameters:
+    - jql: A Jira Query Language string (e.g., 'project = ASEAT AND resolution = Unresolved')
+
+    Returns:
+    A list of issue keys that match the query.
+    """
+    return helpers._get_issue_keys(jql)
+
+
+@mcp.tool
+def extract_issue_fields(ticket_key: str, include_comments: bool = False) -> dict:
+    """
+    Parameters:
+    - ticket_key: Jira issue key (e.g., "PROJ-123")
+    - include_comments: Whether to include cleaned comments
+
+    Returns:
+    A dictionary with issue metadata and optionally comments.
     """
     try:
-        ticket_data = []
-
-        for key in ticket_keys:
-            try:
-                issue = jira.issue(key, expand="renderedFields")
-                comments = jira.comments(key)
-
-                summary = issue.fields.summary
-                status = issue.fields.status.name
-                priority = getattr(issue.fields.priority, "name", None)
-                assignee = getattr(issue.fields.assignee, "displayName", None)
-                created = issue.fields.created
-                updated = issue.fields.updated
-                description = issue.fields.description or ""
-
-                comment_text = "\n".join(
-                    f"{c.author.displayName}: {c.body}" for c in comments
-                )
-
-                ticket_data.append({
-                    "key": key,
-                    "summary": summary,
-                    "status": status,
-                    "priority": priority,
-                    "assignee": assignee,
-                    "created": created,
-                    "updated": updated,
-                    "description": description,
-                    "comments": comment_text
-                })
-            except Exception as e:
-                ticket_data.append({
-                    "key": key,
-                    "error": f"Failed to fetch ticket: {str(e)}"
-                })
-
-        # Prepare input for LLM
-        formatted_input = "\n\n".join([
-            textwrap.dedent(f"""
-            Ticket {t['key']}:
-            Summary: {t.get('summary', '')}
-            Status: {t.get('status', '')}
-            Priority: {t.get('priority', '')}
-            Assignee: {t.get('assignee', '')}
-            Created: {t.get('created', '')}
-            Updated: {t.get('updated', '')}
-
-            Description:
-            {t.get('description', '')}
-
-            Comments:
-            {t.get('comments', '')}
-            """).strip()
-            for t in ticket_data if "error" not in t
-        ])
-
-        system_prompt = (
-            "You are an expert Jira analyst. The user will provide raw issue data including "
-            "summaries, statuses, priorities, and comments.\n\n"
-            "Your task:\n"
-            "1. Write a high-level 'executive_summary' that captures important patterns, updates, progress, blockers, or risks across all tickets.\n"
-            "2. For each ticket, return a concise summary (2–4 sentences) under 'ticket_summaries' keyed by ticket ID.\n\n"
-            "FORMAT:\n"
-            "{\n"
-            "  \"executive_summary\": \"...\",\n"
-            "  \"ticket_summaries\": {\n"
-            "    \"TICKET-123\": \"summary...\",\n"
-            "    \"TICKET-456\": \"summary...\"\n"
-            "  }\n"
-            "}\n"
-            "- Return ONLY valid JSON. Do not include markdown, comments, or explanation.\n"
-            "- Ensure all JSON is syntactically correct (no trailing commas, correct quoting, etc.)."
-        )
-
-        user_input = f"""
-        Here is the data for multiple Jira tickets:
-
-        {formatted_input}
-        """
-
-        response = call_claude(system_prompt=system_prompt, user_input=user_input)
-        fenced = re.search(r"\{.*\}", response, re.DOTALL)
-        response_json = fenced.group(0) if fenced else response
-
-        return json.loads(response_json)
-
+        issue = jira.issue(ticket_key)
+        return helpers._extract_issue_fields(issue, include_comments=include_comments, jira_client=jira if include_comments else None)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to summarize Jira tickets: {e}")
-
-
-
+        return {"error": f"Failed to extract fields for {ticket_key}: {e}"}
 
 
 if __name__ == "__main__":
-    mcp.run(transport="sse", host="127.0.0.1", port=8001)  # run 'fastmcp run main.py --transport sse --port 8001'
+    mcp.run(transport="sse", host="0.0.0.0", port=8100)  # run 'fastmcp run main.py --transport sse --port 8100'
+
+
