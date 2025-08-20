@@ -14,6 +14,13 @@ import os
 from dotenv import load_dotenv
 import re
 from datetime import datetime, timezone
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
+from typing import Dict, DefaultDict
+from datetime import datetime
+import pytz
+from fastapi import HTTPException
+
 
 import pytz
 from mcp_common.utils.bedrock_wrapper import call_claude, call_nova_lite
@@ -24,9 +31,9 @@ from mcp_jira.main import extract_issue_fields
 load_dotenv(override=True)
 
 
-JIRA_URL = os.getenv("JIRA_BASE_URL")
-JIRA_USER = os.getenv("JIRA_EMAIL")
-JIRA_TOKEN = os.getenv("JIRA_API_TOKEN")
+JIRA_URL = os.getenv("JIRA_BASE_URL", "")
+JIRA_USER = os.getenv("JIRA_EMAIL","")
+JIRA_TOKEN = os.getenv("JIRA_API_TOKEN","")
 
 DEFAULT_CATEGORY = os.getenv("DEFAULT_PROJECT_CATEGORY", "")
 EXCLUDED_KEYS = [k.strip() for k in os.getenv("EXCLUDED_PROJECT_KEYS", "").split(",") if k.strip()]
@@ -80,24 +87,29 @@ def get_clean_comments_from_issue(jira, issue) -> list[dict]:
         return [{"error": str(e)}]
 
 
-def _extract_issue_fields(issue, include_comments=False, jira_client=None):
+def _extract_issue_fields(issue, include_comments=False, jira_client=None) -> dict:
+    """Pure Python helper to extract fields from a Jira issue."""
+    fields = issue.fields
     data = {
         "key": issue.key,
-        "summary": issue.fields.summary,
-        "status": issue.fields.status.name,
-        "priority": issue.fields.priority.name if issue.fields.priority else None,
-        "assignee": issue.fields.assignee.displayName if issue.fields.assignee else None,
-        "reporter": issue.fields.reporter.displayName if issue.fields.reporter else None,
-        "created": issue.fields.created,
-        "updated": issue.fields.updated,
-        "task_type": issue.fields.issuetype.name if issue.fields.issuetype else None,
+        "summary": getattr(fields, "summary", ""),
+        "status": getattr(fields.status, "name", "Unknown"),
+        "priority": getattr(fields.priority, "name", "None"),
+        "assignee": getattr(fields.assignee, "displayName", "Unassigned"),
+        "reporter": getattr(fields.reporter, "displayName", "Unknown"),
+        "created": getattr(fields, "created", None),
+        "updated": getattr(fields, "updated", None),
+        "resolution": getattr(fields, "resolution", None),
     }
 
-    if include_comments and jira_client is not None:
-        data["comments"] = get_clean_comments_from_issue(jira_client, issue)
+    if include_comments and jira_client:
+        try:
+            comments = jira_client.comments(issue.key)
+            data["comments"] = [c.body for c in comments]
+        except Exception:
+            data["comments"] = []
 
     return data
-
 
 def _parse_jira_date(input_str: str) -> str:
     """
@@ -334,7 +346,7 @@ def _generate_jql_from_input(
         all_projects = [p for p in all_projects if p.get("category", "").lower() == category_filter.lower()]
 
     # Filter out excluded projects
-    exclude_projects = [p.strip() for p in exclude_projects if p.strip()]
+    exclude_projects = [p.strip() for p in (exclude_projects or []) if p.strip()]
     allowed_projects = [p for p in all_projects if p["key"] not in exclude_projects]
 
     if not allowed_projects:
@@ -429,6 +441,15 @@ def _generate_jql_from_input(
 
 
 
+
+@dataclass
+class ProjectData:
+    total: int = 0
+    unresolved_by_priority: Counter = field(default_factory=Counter)
+    unresolved_by_status: Counter = field(default_factory=Counter)
+    unresolved_by_assignee: Counter = field(default_factory=Counter)
+
+
 def _summarize_jira_issues(jql: str) -> Dict:
     """
     Executes a JQL query using enhanced search and returns a detailed summary:
@@ -448,6 +469,7 @@ def _summarize_jira_issues(jql: str) -> Dict:
         next_page_token = None
         max_results = 100
 
+        # Fetch all issues
         while True:
             issues = jira.enhanced_search_issues(
                 jql_str=jql,
@@ -467,21 +489,20 @@ def _summarize_jira_issues(jql: str) -> Dict:
         total_issues = len(all_issues)
         unresolved_issues = [i for i in all_issues if not getattr(i.fields, "resolution", None)]
 
+        # Global counters
         global_unresolved_by_priority = Counter()
         global_unresolved_by_status = Counter()
         global_unresolved_by_assignee = Counter()
 
-        per_project_data = defaultdict(lambda: {
-            "total": 0,
-            "unresolved_by_priority": Counter(),
-            "unresolved_by_status": Counter(),
-            "unresolved_by_assignee": Counter()
-        })
+        # Per-project structured data
+        per_project_data: DefaultDict[str, ProjectData] = defaultdict(ProjectData)
 
+        # Count totals
         for issue in all_issues:
             project_key = getattr(issue.fields.project, "key", "UNKNOWN")
-            per_project_data[project_key]["total"] += 1
+            per_project_data[project_key].total += 1
 
+        # Count unresolved
         for issue in unresolved_issues:
             fields = issue.fields
             project_key = getattr(fields.project, "key", "UNKNOWN")
@@ -489,22 +510,25 @@ def _summarize_jira_issues(jql: str) -> Dict:
             status = getattr(fields.status, "name", "Unknown")
             assignee = getattr(fields.assignee, "displayName", "Unassigned")
 
-            per_project_data[project_key]["unresolved_by_priority"][priority] += 1
-            per_project_data[project_key]["unresolved_by_status"][status] += 1
-            per_project_data[project_key]["unresolved_by_assignee"][assignee] += 1
+            per_project_data[project_key].unresolved_by_priority[priority] += 1
+            per_project_data[project_key].unresolved_by_status[status] += 1
+            per_project_data[project_key].unresolved_by_assignee[assignee] += 1
 
             global_unresolved_by_priority[priority] += 1
             global_unresolved_by_status[status] += 1
             global_unresolved_by_assignee[assignee] += 1
 
-        # Add unresolved ratio and convert counters to dicts
+        # Convert per-project data to dict for JSON
+        per_project_dict: Dict[str, Dict] = {}
         for project_key, data in per_project_data.items():
-            total = data["total"]
-            unresolved_total = sum(data["unresolved_by_priority"].values())
-            data["unresolved_ratio"] = round(unresolved_total / total, 2) if total else 0
-            data["unresolved_by_priority"] = dict(data["unresolved_by_priority"])
-            data["unresolved_by_status"] = dict(data["unresolved_by_status"])
-            data["unresolved_by_assignee"] = dict(data["unresolved_by_assignee"])
+            unresolved_total = sum(data.unresolved_by_priority.values())
+            per_project_dict[project_key] = {
+                "total": data.total,
+                "unresolved_ratio": round(unresolved_total / data.total, 2) if data.total else 0,
+                "unresolved_by_priority": dict(data.unresolved_by_priority),
+                "unresolved_by_status": dict(data.unresolved_by_status),
+                "unresolved_by_assignee": dict(data.unresolved_by_assignee),
+            }
 
         return {
             "total_issues": total_issues,
@@ -512,7 +536,7 @@ def _summarize_jira_issues(jql: str) -> Dict:
             "unresolved_global_by_priority": dict(global_unresolved_by_priority),
             "unresolved_global_by_status": dict(global_unresolved_by_status),
             "unresolved_global_by_assignee": dict(global_unresolved_by_assignee),
-            "per_project": per_project_data,
+            "per_project": per_project_dict,
             "generated_at": datetime.utcnow().replace(tzinfo=pytz.UTC).isoformat()
         }
 
@@ -662,7 +686,6 @@ def _resolve_project_name(human_input: str, category_filter: Optional[str] = Non
 
 
 
-
 def _advanced_search_issues(
     projects: list[str] = [],
     priorities: list[str] = [],
@@ -674,14 +697,17 @@ def _advanced_search_issues(
 ) -> list[dict]:
     """
     Search Jira issues using enhanced_search_issues and simplified filters.
+    Returns a list of dictionaries with extracted issue fields.
     """
     jql_parts = []
 
     if projects:
-        jql_parts.append(f'project IN ({", ".join(f'"{p}"' for p in projects)})')
+        quoted_projects = [f'"{p}"' for p in projects]
+        jql_parts.append(f'project IN ({", ".join(quoted_projects)})')
 
     if priorities:
-        jql_parts.append(f'priority IN ({", ".join(f'"{p}"' for p in priorities)})')
+        quoted_priorities = [f'"{p}"' for p in priorities]
+        jql_parts.append(f'priority IN ({", ".join(quoted_priorities)})')
 
     if resolved is True:
         jql_parts.append('resolution NOT IN (EMPTY, Unresolved)')
@@ -712,7 +738,7 @@ def _advanced_search_issues(
             use_post=True,
             json_result=False
         )
-        return [extract_issue_fields(issue) for issue in response]
+        return [_extract_issue_fields(issue) for issue in response]
 
     except Exception as e:
         return [{"error": str(e), "jql": jql}]
@@ -730,7 +756,7 @@ def _get_tickets_insights(ticket_keys: List[str]) -> Dict:
     for key in ticket_keys:
         try:
             extracted_data[key] = _extract_issue_fields(
-                jira.issue(key), include_comments=True, jira_client=jira
+                jira.issue(key)
             )
         except Exception as e:
             summaries[key] = f"❌ Error fetching ticket data: {e}"
@@ -806,10 +832,6 @@ def _get_tickets_insights(ticket_keys: List[str]) -> Dict:
 
 
 
-
-
-    
-
 def _summarize_and_analyze_jql(jql: str) -> Dict:
     """
     Simplified summary of Jira issues per project:
@@ -823,15 +845,8 @@ def _summarize_and_analyze_jql(jql: str) -> Dict:
         - Average resolution time by priority
     """
     try:
-        from collections import Counter, defaultdict
-        from datetime import datetime
-        import pytz
-
-        all_issues = []
-        next_page_token = None
-        max_results = 100
-
-        per_project_data = defaultdict(lambda: {
+        # Define structure per project
+        per_project_data: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
             "project_name": "",
             "total": 0,
             "unresolved": 0,
@@ -842,12 +857,19 @@ def _summarize_and_analyze_jql(jql: str) -> Dict:
             "incident_sla_resolution_by_priority": defaultdict(list)
         })
 
+        all_issues: List[Any] = []
+        next_page_token = None
+        max_results = 100
+
         while True:
             issues = jira.enhanced_search_issues(
                 jql_str=jql,
                 nextPageToken=next_page_token,
                 maxResults=max_results,
-                fields=["project", "priority", "issuetype", "created", "resolutiondate", "status", "assignee", "resolution"],
+                fields=[
+                    "project", "priority", "issuetype", "created",
+                    "resolutiondate", "status", "assignee", "resolution"
+                ],
                 use_post=True
             )
 
@@ -867,12 +889,14 @@ def _summarize_and_analyze_jql(jql: str) -> Dict:
             issue_type = getattr(fields.issuetype, "name", "Unknown")
             status = getattr(fields.status, "name", "Unknown")
             assignee = getattr(fields.assignee, "displayName", "Unassigned")
-            created = fields.created
+            created = getattr(fields, "created", None)
             resolved = getattr(fields, "resolutiondate", None)
             resolution = getattr(fields, "resolution", None)
 
             data = per_project_data[project_key]
             data["project_name"] = project_name
+
+            # Safe increments
             data["total"] += 1
             data["by_priority"][priority] += 1
             data["by_status"][status] += 1
@@ -881,6 +905,7 @@ def _summarize_and_analyze_jql(jql: str) -> Dict:
             if not resolution:
                 data["unresolved"] += 1
 
+            # Special handling for Incident SLA
             if issue_type == "Incident SLA":
                 data["incident_sla_count_by_priority"][priority] += 1
                 if created and resolved:
@@ -892,7 +917,8 @@ def _summarize_and_analyze_jql(jql: str) -> Dict:
                     except Exception:
                         pass
 
-        simplified_output = {}
+        # Convert results into plain dicts
+        simplified_output: Dict[str, Any] = {}
         for project_key, data in per_project_data.items():
             simplified_output[project_key] = {
                 "project_name": data["project_name"],
@@ -905,6 +931,7 @@ def _summarize_and_analyze_jql(jql: str) -> Dict:
                 "incident_sla_avg_resolution_by_priority": {
                     prio: round(sum(times) / len(times), 2)
                     for prio, times in data["incident_sla_resolution_by_priority"].items()
+                    if times
                 }
             }
 

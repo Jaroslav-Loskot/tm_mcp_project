@@ -6,7 +6,8 @@ from functools import lru_cache
 from typing import Annotated, Any, Dict, List, Optional, Union
 
 from dotenv import load_dotenv
-from simple_salesforce import Salesforce, SalesforceMalformedRequest
+from simple_salesforce.api import Salesforce
+from simple_salesforce.exceptions import SalesforceMalformedRequest
 from typing_extensions import TypedDict
 
 from langgraph.prebuilt import ToolNode
@@ -15,7 +16,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
-
+from typing import cast
 import datetime
 
 import mcp_salesforce.helpers as helpers
@@ -37,7 +38,7 @@ def init_chat_model(model_key: str = "NOVA_LITE_MODEL_ID") -> ChatBedrock:
     """Initialize the Bedrock chat model."""
     model_id = os.environ[model_key]
     region = os.environ["AWS_REGION"]
-    return ChatBedrock(model_id=model_id, region_name=region, model_kwargs={"temperature": 0})
+    return ChatBedrock(model=model_id, region=region, model_kwargs={"temperature": 0})
 
 
 # --------------------------------------------------------------------------------------
@@ -68,14 +69,14 @@ def _trace_as_text(state: Dict[str, Any]) -> str:
             content = m.content
             if isinstance(content, list):  # Claude/Bedrock blocks
                 for block in content:
-                    btype = block.get("type")
+                    btype = block.get("type") if isinstance(block, dict) else None
                     if btype == "text":
-                        t = (block.get("text") or "").strip()
+                        t = (block.get("text", "") if isinstance(block, dict) else "").strip()
                         if t:
                             lines.append("  " + t.replace("\n", "\n  "))
                     elif btype == "tool_use":
-                        name = block.get("name")
-                        args = block.get("input")
+                        name = block.get("name", "") if isinstance(block, dict) else ""
+                        args = block.get("input", {}) if isinstance(block, dict) else {}
                         lines.append(f"  🔧 Tool Call → {name}({json.dumps(args, ensure_ascii=False)})")
             elif isinstance(content, str):
                 if content.strip():
@@ -162,10 +163,10 @@ def parse_salesforce_date_tool(natural_input: str, want_datetime: bool = False) 
     resp = llm.invoke(
         [SystemMessage(content=system_prompt), HumanMessage(content=f"Convert: {natural_input}\nForce datetime: {bool(want_datetime)}")]
     ).content
-    mdt = re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", resp)
+    mdt = re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", str(resp))
     if mdt:
         return mdt.group(0)
-    md = re.search(r"\d{4}-\d{2}-\d{2}", resp)
+    md = re.search(r"\d{4}-\d{2}-\d{2}", str(resp))
     if md:
         return md.group(0)
     raise ValueError(f"Could not parse date from: {resp}")
@@ -209,7 +210,8 @@ def validate_soql_tool(soql: str) -> Dict[str, Any]:
 def list_stage_names_tool(active_only: bool = True) -> List[str]:
     """Return ONLY the available values for Opportunity.StageName (active by default)."""
     sf = helpers.get_sf_connection()
-    meta = sf.Opportunity.describe()
+    opportunity: Any = sf.Opportunity
+    meta = opportunity.describe()
     for field in meta["fields"]:
         if field["name"] == "StageName":
             vals = []
@@ -296,28 +298,31 @@ def list_core_attribute_names_tool() -> List[str]:
 
 
 @tool
-def llm_pick_best_name_matches_tool(
+def find_best_name_matches(
     query: str,
     k: int = 5,
-    max_per_type: int = 400,
-    shortlist_cap: int = 80,
-    force: bool = True,
+    max_records: int = 2000
 ) -> List[Dict[str, Any]]:
     """
-    Let the LLM pick top-K best matches across Account + Opportunity.
-    Always returns both IDs (non-applicable one is None).
+    Finds and ranks the best matching Account and Opportunity records based on a search query. 
+    This tool is highly effective for queries that contain spelling mistakes or are only partial names.
+    It returns a list of top matches, ordered by a robust fuzzy match score.
 
-    Output rows:
-    {
-      "account_id": "001... or None",
-      "opportunity_id": "006... or None",
-      "name": "<Name>",
-      "type": "Account" | "Opportunity",
-      "match_score": 0..100
-    }
+    Args:
+        query: The search term or name to match against Account and Opportunity records.
+        k: The number of top-ranked matches to return. Defaults to 5.
+        max_records: The maximum number of records to fetch from Salesforce for each object type (Account and Opportunity). Defaults to 2000.
+
+    Returns:
+        A list of dictionaries, where each dictionary represents a matched record and includes:
+        - "account_id": The Salesforce ID of the Account (or None if the record is an Opportunity).
+        - "opportunity_id": The Salesforce ID of the Opportunity (or None if the record is an Account).
+        - "name": The name of the record.
+        - "type": "Account" or "Opportunity".
+        - "match_score": A calculated score (0-100) indicating how well the name matches the query.
     """
     
-    return helpers.llm_pick_best_name_matches_tool(query, k, max_per_type, shortlist_cap, force)
+    return helpers._find_best_name_matches(query, k, max_records)
 
 
 @tool
@@ -337,7 +342,7 @@ tools = [
     list_stage_names_tool,
     get_salesforce_field_schema,
     list_core_attribute_names_tool,
-    llm_pick_best_name_matches_tool,
+    find_best_name_matches,
     resolve_owner_names_tool,
 ]
 
@@ -374,14 +379,14 @@ TOOL_CACHE = {
   important_attrs: [...],        # chosen subset from names
   schema: {attr -> schema},      # get_salesforce_field_schema(object_api, field_api) for used attrs only
   stage_names_true: [...],       # list_stage_names_tool(True) if needed
-  matches: [...],                # from llm_pick_best_name_matches_tool
+  matches: [...],                # from find_best_name_matches
   date_literals: {...}           # e.g., {"created": "LAST_QUARTER"}
 }
 
 WORKFLOW (mandatory)
 0) ENTITY RESOLUTION (if a specific name is present):
    - If the request mentions a concrete account/opportunity name (e.g., “Allica Bank”, “ACME Renewal”),
-     call llm_pick_best_name_matches_tool(query=<name>, k=3, force=True) and cache to TOOL_CACHE.matches.
+     call find_best_name_matches(query=<name>, k=3, force=True) and cache to TOOL_CACHE.matches.
    - Use the TOP match for filtering:
      • If Opportunity requested or top match.type == "Opportunity" → WHERE Id = '<opportunity_id>'.
      • Else (Account) → for Opportunity queries use WHERE AccountId = '<account_id>'; for Account queries WHERE Id = '<account_id>'.
@@ -450,15 +455,16 @@ FINAL OUTPUT (JSON only; no extra text):
 # --------------------------------------------------------------------------------------
 # ROUTING
 # --------------------------------------------------------------------------------------
-def route_tools(state: State):
+def route_tools(state: Union[State, List[AIMessage]]):
     if isinstance(state, list):
-        ai_message = state[-1]
-    elif messages := state.get("messages", []):
-        ai_message = messages[-1]
+        ai_message = state[-1] if state else None
+    elif isinstance(state, dict):
+        messages = state.get("messages", [])
+        ai_message = messages[-1] if messages else None
     else:
-        raise ValueError(f"No messages found in input state to tool_edge: {state}")
+        raise ValueError(f"Unsupported state type: {type(state)}")
 
-    if hasattr(ai_message, "tool_calls") and len(ai_message.tool_calls) > 0:
+    if ai_message and getattr(ai_message, "tool_calls", []):
         return "tools"
     return END
 
@@ -470,6 +476,8 @@ graph_builder.set_entry_point("bot_manager")
 graph_builder.add_conditional_edges("bot_manager", route_tools, {"tools": "tools", END: END})
 graph_builder.add_edge("tools", "bot_manager")
 graph = graph_builder.compile()
+
+
 
 
 # --------------------------------------------------------------------------------------
@@ -498,7 +506,7 @@ def call_agent_generate_soql(
           -> dict with keys { "output": ..., "trace": ..., "state": ... }
     """
     user_message = HumanMessage(content=human_input)
-    state: Dict[str, Any] = {"messages": [user_message]}
+    state: State = cast(State, {"messages": [user_message]})
 
     final_state: Optional[Dict[str, Any]] = None
     trace_text = ""
@@ -514,12 +522,16 @@ def call_agent_generate_soql(
     else:
         final_state = graph.invoke(state)
         if with_trace:
-            trace_text = _trace_as_text(final_state)
+            trace_text = _trace_as_text(cast(Dict[str, Any], final_state))
 
     # Extract final assistant content safely
+    if not final_state:
+        raise RuntimeError("graph.invoke() returned None")
+
     messages = final_state["messages"]
+
     last_ai = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
-    output = getattr(last_ai, "content", None) if last_ai is not None else getattr(messages[-1], "content", "")
+    output = getattr(last_ai, "content", "") if last_ai else str(messages[-1].content or "")
 
     if not with_trace and not return_state:
         return output

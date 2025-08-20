@@ -26,8 +26,8 @@ warnings.filterwarnings(
 
 load_dotenv(override=True)
 JIRA_URL = os.getenv("JIRA_BASE_URL")
-JIRA_USER = os.getenv("JIRA_EMAIL")
-JIRA_TOKEN = os.getenv("JIRA_API_TOKEN")
+JIRA_USER = os.getenv("JIRA_EMAIL","")
+JIRA_TOKEN = os.getenv("JIRA_API_TOKEN","")
 
 DEFAULT_CATEGORY = os.getenv("DEFAULT_PROJECT_CATEGORY", "")
 EXCLUDED_KEYS = [k.strip() for k in os.getenv("EXCLUDED_PROJECT_KEYS", "").split(",") if k.strip()]
@@ -45,21 +45,27 @@ def pretty_print_messages(state):
 
             content = m.content
 
-            # Claude structured response
+            # Claude structured response (list of blocks)
             if isinstance(content, list):
                 for block in content:
-                    block_type = block.get("type")
-                    if block_type == "text":
-                        print("  " + block["text"].strip().replace("\n", "\n  "))
-                    elif block_type == "tool_use":
-                        print(f"  🔧 Tool Call → {block['name']}({json.dumps(block['input'])})\n")
+                    if isinstance(block, dict):  # ✅ safeguard
+                        block_type = block.get("type")
+                        if block_type == "text":
+                            text = block.get("text", "")
+                            print("  " + text.strip().replace("\n", "\n  "))
+                        elif block_type == "tool_use":
+                            print(f"  🔧 Tool Call → {block.get('name')}({json.dumps(block.get('input', {}))})\n")
+                    else:
+                        print(f"⚠️ Unexpected block type: {type(block)} {block}")
 
             # Nova Lite / plain string response
             elif isinstance(content, str):
                 print(f"  {content.strip()}")
                 if getattr(m, "tool_calls", None):
                     for tc in m.tool_calls:
-                        print(f"  🔧 Tool Call → {tc['name']}({json.dumps(tc['args'])})\n")
+                        name = tc.get("name", "unknown")
+                        args = json.dumps(tc.get("args", {}))
+                        print(f"  🔧 Tool Call → {name}({args})\n")
 
             # Unknown content format
             else:
@@ -80,8 +86,8 @@ def init_chat_model(model_key: str = "CLAUDE_MODEL_ID") -> ChatBedrock:
     region = os.environ["AWS_REGION"]
 
     return ChatBedrock(
-        model_id=model_id,
-        region_name=region,
+        model=model_id,
+        region=region,
         model_kwargs={"temperature": 0}
     )
 
@@ -151,13 +157,21 @@ def parse_jira_date_tool(input_str: str) -> str:
     user_prompt = f"Convert to date: {input_str}"
     
     llm = init_chat_model("NOVA_LITE_MODEL_ID") 
-    response = llm.invoke(SystemMessage(content=system_prompt) + HumanMessage(content=user_prompt)).content
 
-    match = re.search(r"\d{4}-\d{2}-\d{2}", response)
+    # ✅ Pass as a list of messages
+    response = llm.invoke([
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_prompt)
+    ])
+
+    text = str(response.content if hasattr(response, "content") else response)
+
+    match = re.search(r"\d{4}-\d{2}-\d{2}", text)
+
     if match:
         return match.group(0)
     else:
-        raise ValueError(f"Could not parse a valid date from response: {response}")
+        raise ValueError(f"Could not parse a valid date from response: {text}")
 
 @tool
 def resolve_project_name_tool(human_input: str) -> List[Dict[str, str]]:
@@ -203,7 +217,12 @@ def check_jql(jql: str) -> Dict:
 
 
 # **IMPORTANT FIX**: Add the resolve_project_name_tool to the main tools list
-tools = [parse_jira_date_tool, check_jql, list_issue_type_statuses_tool, resolve_project_name_tool]
+tools = [
+    parse_jira_date_tool, 
+    check_jql, 
+    list_issue_type_statuses_tool, 
+    resolve_project_name_tool
+    ]
 
 
 
@@ -219,7 +238,7 @@ def bot_manager(state: State):
     - Always resolve project names from the user input *before* generating JQL. Use the `resolve_project_name_tool` for this.
     - If the input contains any project names (e.g., 'UniCredit Italy', 'Austria DevOps'), call the `resolve_project_name_tool` with the project name.
     - Only proceed to generate JQL after all names are resolved.
-    - If a project name is not found by the tool, respond to the user that the project could not be found and ask for clarification.
+    - IMPORTANT: If a project name is not found by the tool, or you consider the name too different, respond to the user that the project could not be found and ask for clarification.
 
     Tool Usage:
     - Always use tools to resolve project names, date expressions, and available issue types/statuses.
@@ -255,26 +274,28 @@ def bot_manager(state: State):
     ```json
     { "jql": "<generated JQL>", "approx_query_results": <number> }
     """
-
-    messages = state["messages"]
+    # ensure messages is always a list[BaseMessage]
+    messages: list = state.get("messages", [])
     if not any(isinstance(m, SystemMessage) for m in messages):
         messages = [SystemMessage(content=SYSTEM_PROMPT)] + messages
 
-    new_message = llm_with_tools.invoke(messages)
+    # invoke with messages (list of BaseMessage)
+    new_message = llm_with_tools.invoke(messages)  # type: ignore[arg-type]
+
     return {"messages": messages + [new_message]}
 
 
 def route_tools(state: State):
-    if isinstance(state, list):
-        ai_message = state[-1]
-    elif messages := state.get("messages", []):
-        ai_message = messages[-1]
-    else:
+    messages: list = state.get("messages", [])
+    if not messages:
         raise ValueError(f"No messages found in input state to tool_edge: {state}")
 
-    if hasattr(ai_message, "tool_calls") and len(ai_message.tool_calls) > 0:
-        return "tools"
+    ai_message = messages[-1]
+    if isinstance(ai_message, AIMessage) and getattr(ai_message, "tool_calls", None):
+        if len(ai_message.tool_calls) > 0:
+            return "tools"
     return END
+
 
 graph_builder = StateGraph(State, context_schema=AgentContext)
 
@@ -290,10 +311,14 @@ graph_builder.add_conditional_edges(
 graph_builder.add_edge("tools", "bot_manager")
 graph = graph_builder.compile()
 
-def call_agent_generate_jql(human_input : str):
+
+from typing import cast
+
+def call_agent_generate_jql(human_input: str):
     user_message = HumanMessage(content=human_input)
-    state = {"messages": [user_message]}
-    return graph.invoke(state)
+    state: State = {"messages": [user_message]}  # build correctly typed State
+    return graph.invoke(cast(State, state))
+
 
 
 

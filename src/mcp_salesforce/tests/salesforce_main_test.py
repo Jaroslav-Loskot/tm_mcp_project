@@ -3,7 +3,8 @@ import re
 import json
 from typing import Any, Dict
 from dotenv import load_dotenv
-from simple_salesforce import Salesforce, SalesforceMalformedRequest
+from simple_salesforce.api import Salesforce
+from simple_salesforce.exceptions import SalesforceMalformedRequest
 
 import mcp_salesforce.agent_generate_SOQL as sf_agent
 import mcp_salesforce.helpers as helpers 
@@ -157,13 +158,22 @@ if __name__ == "__main__":
         with_trace=True,
         return_state=True
     )
+
+    # ---- safe dict/object access for bundle ----
+    if isinstance(bundle, dict):
+        trace_data = bundle.get("trace")
+        output_data = bundle.get("output")
+    else:
+        trace_data = getattr(bundle, "trace", None)
+        output_data = getattr(bundle, "output", None)
+
     print("\n🛰️ Trace:")
-    print(bundle["trace"])
+    print(trace_data)
 
-    print("\n🔎 Raw LLM output (bundle['output']):")
-    print(bundle["output"])
+    print("\n🔎 Raw LLM output (bundle output):")
+    print(output_data)
 
-    parsed_b = _extract_json_from_agent(bundle["output"])
+    parsed_b = _extract_json_from_agent(output_data or "")
     print("\n✅ Parsed JSON:")
     print(json.dumps(parsed_b, indent=2, ensure_ascii=False))
 

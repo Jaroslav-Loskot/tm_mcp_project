@@ -22,8 +22,8 @@ from mcp_common.utils.bedrock_wrapper import call_claude
 load_dotenv(override=True)
 
 JIRA_URL = os.getenv("JIRA_BASE_URL")
-JIRA_USER = os.getenv("JIRA_EMAIL")
-JIRA_TOKEN = os.getenv("JIRA_API_TOKEN")
+JIRA_USER = os.getenv("JIRA_EMAIL","")
+JIRA_TOKEN = os.getenv("JIRA_API_TOKEN","")
 
 DEFAULT_CATEGORY = os.getenv("DEFAULT_PROJECT_CATEGORY", "")
 EXCLUDED_KEYS = [k.strip() for k in os.getenv("EXCLUDED_PROJECT_KEYS", "").split(",") if k.strip()]
@@ -53,7 +53,7 @@ def get_issue(key: str) -> dict:
     """
     try:
         issue = jira.issue(key)
-        return extract_issue_fields(issue, include_comments=True, jira_client=jira)
+        return helpers._extract_issue_fields(issue, include_comments=True, jira_client=jira)
     except Exception as e:
         return {"error": str(e)}
 

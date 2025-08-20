@@ -2,7 +2,7 @@ from fastmcp import FastMCP
 import mcp_salesforce.agent_generate_SOQL as sf_agent
 import mcp_salesforce.helpers as helpers
 from typing import Any, Dict, List, Optional, Union
-from simple_salesforce import SalesforceMalformedRequest
+from simple_salesforce.exceptions import SalesforceMalformedRequest
 
 mcp = FastMCP("Salesforce MCP Server", auth=None)
 
@@ -173,7 +173,7 @@ def find_best_name_matches(
         - "type": "Account" or "Opportunity".
         - "match_score": A calculated score (0-100) indicating how well the name matches the query.
     """
-    return helpers.find_best_name_matches(query, k, max_records)
+    return helpers._find_best_name_matches(query, k, max_records)
 
 
 

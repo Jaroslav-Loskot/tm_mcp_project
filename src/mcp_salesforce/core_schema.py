@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
+from simple_salesforce.api import SFType
 
 from mcp_salesforce import helpers  # uses helpers.get_sf_connection()
 
@@ -100,8 +101,12 @@ def build_core_field_index_cached() -> Dict[str, Dict[str, Any]]:
     Only fields that actually exist in your org are included.
     """
     sf = helpers.get_sf_connection()
-    opp_desc = sf.Opportunity.describe()
-    acc_desc = sf.Account.describe()
+
+    opportunity = SFType("Opportunity", sf.session_id, sf.sf_instance)
+    account = SFType("Account", sf.session_id, sf.sf_instance)
+
+    opp_desc = opportunity.describe()
+    acc_desc = account.describe()
 
     idx: Dict[str, Dict[str, Any]] = {}
 

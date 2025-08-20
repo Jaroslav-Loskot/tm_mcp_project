@@ -5,7 +5,6 @@ import re
 import warnings
 from jira import JIRA
 from langgraph.prebuilt import ToolNode
-from langchain.chat_models import init_chat_model
 from dotenv import load_dotenv
 from langchain_aws.chat_models.bedrock import ChatBedrock
 from typing import Annotated, Any, Dict, List, Optional, Union
@@ -19,7 +18,7 @@ from mcp_common.utils.bedrock_wrapper import call_nova_lite
 import mcp_jira.helpers as helpers
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 from langgraph_supervisor import create_supervisor
-from langchain.chat_models import init_chat_model
+from langchain_core.language_models import BaseChatModel
 
 
 warnings.filterwarnings(action="ignore", message=r"datetime.datetime.utcnow")
@@ -27,8 +26,8 @@ warnings.filterwarnings(action="ignore", message=r"datetime.datetime.utcnow")
 
 load_dotenv(override=True)
 JIRA_URL = os.getenv("JIRA_BASE_URL")
-JIRA_USER = os.getenv("JIRA_EMAIL")
-JIRA_TOKEN = os.getenv("JIRA_API_TOKEN")
+JIRA_USER = os.getenv("JIRA_EMAIL", "")
+JIRA_TOKEN = os.getenv("JIRA_API_TOKEN", "")
 
 DEFAULT_CATEGORY = os.getenv("DEFAULT_PROJECT_CATEGORY", "")
 EXCLUDED_KEYS = [k.strip() for k in os.getenv("EXCLUDED_PROJECT_KEYS", "").split(",") if k.strip()]
@@ -91,10 +90,17 @@ def pretty_print_messages(update):
             elif isinstance(message, ToolMessage):
                 print(f"\n🔧 Tool '{message.name}' returned:")
                 try:
-                    parsed = json.loads(message.content)
-                    print(json.dumps(parsed, indent=4))
-                except:
-                    print(f"   {message.content}")
+                    content = message.content
+                    if isinstance(content, str):
+                        parsed = json.loads(content)  # only parse strings
+                    elif isinstance(content, (dict, list)):
+                        parsed = content              # already structured
+                    else:
+                        parsed = str(content)         # fallback
+
+                    print(json.dumps(parsed, indent=4, ensure_ascii=False))
+                except Exception:
+                    print(str(message.content))
 
             elif isinstance(message, SystemMessage):
                 print(f"\n⚙️ System: {message.content}")
@@ -104,13 +110,13 @@ def pretty_print_messages(update):
 
 
 
-def init_chat_model(model_key: str = "CLAUDE_MODEL_ID") -> ChatBedrock:
+def init_chat_model(model_key: str = "CLAUDE_MODEL_ID") -> BaseChatModel:
     model_id = os.environ[model_key]
     region = os.environ["AWS_REGION"]
 
     return ChatBedrock(
-        model_id=model_id,
-        region_name=region,
+        model=model_id,
+        region=region,
         model_kwargs={"temperature": 0}
     )
 
@@ -272,7 +278,7 @@ def resolve_project_names_tool(human_input: str) -> List[Dict[str, str]]:
     # Try to parse valid JSON from the response
     try:
         match_data = json.loads(response)
-        return {"content": json.dumps({"matches": match_data.get("matches", [])})}
+        return [{"content": json.dumps({"matches": match_data.get("matches", [])})}]
 
     except Exception as e:
         raise ValueError(f"Failed to parse response from LLM: {e}\nRaw response:\n{response}")
@@ -489,8 +495,10 @@ def ask_agent_to_generate_jql(human_input: str) -> Optional[Dict[str, Union[str,
     # Extract and parse the final response
     try:
         if isinstance(final_response.content, list):
-            content = "\n".join(
-                block.get("text", "") for block in final_response.content if block.get("type") == "text"
+            content = " ".join(
+                block.get("text", "")
+                for block in (final_response.content or [])
+                if isinstance(block, dict) and block.get("type") == "text"
             )
         else:
             content = final_response.content

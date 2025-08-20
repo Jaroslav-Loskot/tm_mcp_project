@@ -19,7 +19,7 @@ AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_REGION = os.getenv("AWS_REGION")
 
-CLAUDE_MODEL_ID = os.getenv("CLAUDE_MODEL_ID")
+CLAUDE_MODEL_ID = os.getenv("CLAUDE_MODEL_ID", "None")
 NOVA_LITE_MODEL_ID = os.getenv("NOVA_LITE_MODEL_ID")
 
 bedrock_client = boto3.client(
@@ -90,7 +90,7 @@ def init_chat_model(model_key: str = "NOVA_LITE_MODEL_ID") -> ChatBedrock:
     """Initialize the Bedrock chat model."""
     model_id = os.environ[model_key]
     region = os.environ["AWS_REGION"]
-    return ChatBedrock(model_id=model_id, region_name=region, model_kwargs={"temperature": 0})
+    return ChatBedrock(model=model_id, region=region, model_kwargs={"temperature": 0})
 
 
 # --- Claude Generation via signed HTTP request ---

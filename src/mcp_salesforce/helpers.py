@@ -2,13 +2,16 @@ import json
 import os
 import re
 from dotenv import load_dotenv
-from simple_salesforce import Salesforce
+from simple_salesforce.api import Salesforce
 from typing import Any, Dict, List, Optional, Iterable, Tuple, Union
 import mcp_salesforce.core_schema as core_schema
 import mcp_common.utils.bedrock_wrapper as bedrock_wrapper
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 from thefuzz import fuzz
 import mcp_salesforce.helpers as helpers
+from typing import Any, Dict, List, Optional
+from langchain_core.tools import tool
+from difflib import SequenceMatcher
 
 load_dotenv()
 
@@ -132,10 +135,6 @@ def _maybe_json_load(s: str):
 
 
 
-def _strip_attributes(records):
-    """Remove the 'attributes' key that SF adds to each record."""
-    return [{k: v for k, v in r.items() if k != "attributes"} for r in records]
-
 def fetch_accounts_and_opportunities(
     sf: Salesforce,
     account_fields=None,
@@ -178,9 +177,7 @@ def fetch_accounts_and_opportunities(
 
 
 
-from typing import Any, Dict, List, Optional
-from langchain_core.tools import tool
-from difflib import SequenceMatcher
+
 
 # assumes you have:
 # - _require_sf() -> Salesforce
@@ -198,19 +195,6 @@ def _looks_like_id(s: str) -> bool:
 
 def _id_prefix(s: str) -> str:
     return (s or "")[:3]
-
-def _flatten_record(rec: Dict[str, Any], *, prefix: str = "") -> Dict[str, Any]:
-    """Flatten nested SF relationship dicts into dot-keys (e.g., 'Account.Name')."""
-    out: Dict[str, Any] = {}
-    for k, v in rec.items():
-        if k == "attributes":
-            continue
-        key = f"{prefix}{k}" if not prefix else f"{prefix}.{k}"
-        if isinstance(v, dict) and v:
-            out.update(_flatten_record(v, prefix=key))
-        else:
-            out[key] = v
-    return out
 
 def _friendly_to_select_expr(object_api: str, friendly_attr: str) -> Optional[str]:
     """
@@ -241,7 +225,7 @@ def _friendly_to_select_expr(object_api: str, friendly_attr: str) -> Optional[st
 
 
 
-def find_best_name_matches(
+def _find_best_name_matches(
     query: str,
     k: int = 5,
     max_records: int = 2000
@@ -549,6 +533,7 @@ def fetch_entity_details_tool(id_or_name: str) -> Dict[str, Any]:
                 MAX_ROWS = 5000  # safety cap
 
                 try:
+                    acct_id = flat.get("Id") or ""
                     q = f"SELECT Id, Name FROM Opportunity WHERE AccountId = '{_escape_soql_literal(acct_id)}' ORDER BY LastModifiedDate DESC"
                     res = sf.query(q)
                     total = int(res.get("totalSize", 0))
