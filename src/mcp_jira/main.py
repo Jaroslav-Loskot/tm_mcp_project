@@ -412,6 +412,6 @@ def extract_issue_fields(ticket_key: str, include_comments: bool = False) -> dic
 
 
 if __name__ == "__main__":
-    mcp.run(transport="sse", host="0.0.0.0", port=8100)  # run 'fastmcp run main.py --transport sse --port 8100'
+    mcp.run(transport="http", host="0.0.0.0", port=8100, path="/mcp")
 
 
